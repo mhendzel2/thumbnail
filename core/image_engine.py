@@ -17,15 +17,12 @@ try:
 except Exception:
     tifffile = None
 
-try:
-    import h5py
-except Exception:
-    h5py = None
+h5py = None
 
 LOGGER = logging.getLogger(__name__)
 
-STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".tiff", ".tif", ".ome.tif", ".ome.tiff"}
+STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".psd"}
+MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".stk", ".tiff", ".tif", ".ome.tif", ".ome.tiff"}
 
 
 @dataclass(slots=True)
@@ -38,6 +35,15 @@ class ImageEngine:
     def __init__(self) -> None:
         self._max_tiff_plane_pixels = 40_000_000
         self._max_ims_plane_pixels = 24_000_000
+
+    def _get_h5py(self):
+        global h5py
+        if h5py is None:
+            try:
+                h5py = importlib.import_module("h5py")
+            except Exception:
+                return None
+        return h5py
 
     def load_thumbnail(
         self,
@@ -137,7 +143,7 @@ class ImageEngine:
 
     def _is_tiff_path(self, path: Path) -> bool:
         name = path.name.lower()
-        return name.endswith(".tif") or name.endswith(".tiff")
+        return name.endswith(".tif") or name.endswith(".tiff") or name.endswith(".stk")
 
     def _is_ims_path(self, path: Path) -> bool:
         return path.name.lower().endswith(".ims")
@@ -277,11 +283,12 @@ class ImageEngine:
         *,
         slice_request: dict[str, Any] | None = None,
     ) -> ThumbnailResult | None:
-        if h5py is None:
+        h5py_mod = self._get_h5py()
+        if h5py_mod is None:
             return None
 
         try:
-            with h5py.File(str(path), "r") as ims_file:
+            with h5py_mod.File(str(path), "r") as ims_file:
                 dataset_group = ims_file.get("DataSet")
                 if dataset_group is None:
                     return None
@@ -342,11 +349,12 @@ class ImageEngine:
             return None
 
     def _load_ims_metadata(self, path: Path) -> dict[str, Any] | None:
-        if h5py is None:
+        h5py_mod = self._get_h5py()
+        if h5py_mod is None:
             return None
 
         try:
-            with h5py.File(str(path), "r") as ims_file:
+            with h5py_mod.File(str(path), "r") as ims_file:
                 dataset_group = ims_file.get("DataSet")
                 if dataset_group is None:
                     return None

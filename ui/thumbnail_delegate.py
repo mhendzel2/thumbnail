@@ -1,5 +1,6 @@
 from PyQt6.QtCore import QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPen, QFileSystemModel
+from PyQt6.QtCore import QSortFilterProxyModel
 from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
 
 
@@ -20,6 +21,17 @@ class ThumbnailDelegate(QStyledItemDelegate):
 
     def set_metadata_provider(self, provider):
         self._metadata_provider = provider
+
+    def _file_path_for_index(self, index) -> str:
+        model = index.model()
+        if isinstance(model, QFileSystemModel):
+            return model.filePath(index)
+        if isinstance(model, QSortFilterProxyModel):
+            source_index = model.mapToSource(index)
+            source_model = model.sourceModel()
+            if isinstance(source_model, QFileSystemModel) and source_index.isValid():
+                return source_model.filePath(source_index)
+        return ""
 
     def sizeHint(self, option: QStyleOptionViewItem, index):
         return self._item_size
@@ -48,8 +60,7 @@ class ThumbnailDelegate(QStyledItemDelegate):
         )
         painter.drawRoundedRect(thumb_rect, 10, 10)
 
-        model = index.model()
-        file_path = model.filePath(index) if isinstance(model, QFileSystemModel) else ""
+        file_path = self._file_path_for_index(index)
         pixmap = self._thumbnail_provider(file_path) if self._thumbnail_provider and file_path else None
         if pixmap is not None and not pixmap.isNull():
             target = thumb_rect.adjusted(2, 2, -2, -2).toRect()
