@@ -63,6 +63,8 @@ class ImageEngine:
             ims_result = self._load_ims_thumbnail(path, size, slice_request=slice_request)
             if ims_result is not None:
                 return ims_result
+            if self._is_microscopy_path(path):
+                return self._load_microscopy_thumbnail(path, size, slice_request=slice_request)
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": "IMS decode unavailable", "source": "ims-hdf5"},
@@ -110,6 +112,14 @@ class ImageEngine:
             if ims_meta is not None:
                 ims_meta["source"] = "ims-hdf5"
                 return ims_meta
+            if self._is_microscopy_path(path):
+                try:
+                    bio_image = self._open_bioimage(path)
+                    metadata = self._collect_bio_metadata(bio_image)
+                    metadata["source"] = "bioio"
+                    return metadata
+                except Exception:
+                    pass
             return {"broken": True, "error": "IMS metadata unavailable", "source": "ims-hdf5"}
 
         if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
