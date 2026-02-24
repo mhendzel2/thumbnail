@@ -8,7 +8,10 @@ from ui.main_window import MainWindow
 
 def main() -> int:
     app = QApplication(sys.argv)
-    qdarktheme.setup_theme("dark")
+    if hasattr(qdarktheme, "setup_theme"):
+        qdarktheme.setup_theme("dark")
+    else:
+        app.setStyleSheet(qdarktheme.load_stylesheet("dark"))
 
     window = MainWindow()
     window.show()

@@ -168,10 +168,17 @@ class MainWindow(QMainWindow):
 
         self._setup_metadata_dock()
 
-        initial_root = str(Path.home())
-        root_index = self.model.index(initial_root)
-        self.tree_view.setRootIndex(root_index)
-        self.list_view.setRootIndex(root_index)
+        fs_root_index = self.model.index("")
+        if not fs_root_index.isValid():
+            fs_root_index = self.model.index(QDir.rootPath())
+
+        initial_browse_path = str(Path.home())
+        initial_browse_index = self.model.index(initial_browse_path)
+        if not initial_browse_index.isValid():
+            initial_browse_index = fs_root_index
+
+        self.tree_view.setRootIndex(fs_root_index)
+        self.list_view.setRootIndex(initial_browse_index)
 
         tree_selection = self.tree_view.selectionModel()
         if tree_selection is not None:
