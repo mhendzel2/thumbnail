@@ -17,10 +17,15 @@ try:
 except Exception:
     tifffile = None
 
+try:
+    import h5py
+except Exception:
+    h5py = None
+
 LOGGER = logging.getLogger(__name__)
 
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
-MICROSCOPY_EXTENSIONS = {".czi", ".nd2", ".tiff", ".tif", ".ome.tif", ".ome.tiff"}
+MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".tiff", ".tif", ".ome.tif", ".ome.tiff"}
 
 
 @dataclass(slots=True)
@@ -30,6 +35,10 @@ class ThumbnailResult:
 
 
 class ImageEngine:
+    def __init__(self) -> None:
+        self._max_tiff_plane_pixels = 40_000_000
+        self._max_ims_plane_pixels = 24_000_000
+
     def load_thumbnail(
         self,
         file_path: str,
@@ -44,10 +53,23 @@ class ImageEngine:
         if ext in STANDARD_EXTENSIONS:
             return self._load_standard_thumbnail(path, size)
 
+        if self._is_ims_path(path):
+            ims_result = self._load_ims_thumbnail(path, size, slice_request=slice_request)
+            if ims_result is not None:
+                return ims_result
+            return ThumbnailResult(
+                pixmap=self._broken_placeholder(size),
+                metadata={"broken": True, "error": "IMS decode unavailable", "source": "ims-hdf5"},
+            )
+
         if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
             fallback = self._load_tiff_thumbnail(path, size, slice_request=slice_request)
             if fallback is not None:
                 return fallback
+            return ThumbnailResult(
+                pixmap=self._broken_placeholder(size),
+                metadata={"broken": True, "error": "TIFF decode unavailable", "source": "tifffile-fallback"},
+            )
 
         if self._is_microscopy_path(path):
             return self._load_microscopy_thumbnail(path, size, slice_request=slice_request)
@@ -77,11 +99,19 @@ class ImageEngine:
             except Exception as exc:
                 return {"broken": True, "error": str(exc)}
 
+        if self._is_ims_path(path):
+            ims_meta = self._load_ims_metadata(path)
+            if ims_meta is not None:
+                ims_meta["source"] = "ims-hdf5"
+                return ims_meta
+            return {"broken": True, "error": "IMS metadata unavailable", "source": "ims-hdf5"}
+
         if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
             fallback = self._load_tiff_metadata(path)
             if fallback is not None:
                 fallback["source"] = "tifffile-fallback"
                 return fallback
+            return {"broken": True, "error": "TIFF metadata unavailable", "source": "tifffile-fallback"}
 
         if self._is_microscopy_path(path):
             try:
@@ -108,6 +138,9 @@ class ImageEngine:
     def _is_tiff_path(self, path: Path) -> bool:
         name = path.name.lower()
         return name.endswith(".tif") or name.endswith(".tiff")
+
+    def _is_ims_path(self, path: Path) -> bool:
+        return path.name.lower().endswith(".ims")
 
     def _is_ome_tiff_path(self, path: Path) -> bool:
         name = path.name.lower()
@@ -177,6 +210,23 @@ class ImageEngine:
         *,
         slice_request: dict[str, Any] | None = None,
     ) -> ThumbnailResult | None:
+        try:
+            with Image.open(path) as image:
+                image.thumbnail((size, size), Image.Resampling.BILINEAR)
+                pixmap = self._pil_to_fitted_qpixmap(image, size)
+                metadata = self._load_tiff_metadata(path) or {
+                    "shape_tczyx": (1, 1, 1, image.height, image.width),
+                    "t_count": 1,
+                    "c_count": len(image.getbands()),
+                    "z_count": 1,
+                    "dtype": "unknown",
+                    "pixel_size_um": None,
+                }
+                metadata["source"] = "tiff-pillow"
+                return ThumbnailResult(pixmap=pixmap, metadata=metadata)
+        except Exception:
+            pass
+
         if tifffile is None:
             return None
 
@@ -186,20 +236,224 @@ class ImageEngine:
                     return None
 
                 series = tiff.series[0]
-                if hasattr(series, "levels") and series.levels:
-                    array = series.levels[-1].asarray()
+                level = series.levels[-1] if hasattr(series, "levels") and series.levels else series
+
+                pages = getattr(level, "pages", None)
+                if pages is not None and len(pages) > 0:
+                    page0 = pages[0]
+                    page_shape = tuple(int(v) for v in getattr(page0, "shape", ()) if isinstance(v, (int, np.integer)))
+                    plane_pixels = int(np.prod(page_shape)) if page_shape else 0
+                    if plane_pixels > self._max_tiff_plane_pixels:
+                        metadata = self._load_tiff_metadata(path) or {
+                            "shape_tczyx": (1, 1, 1, 1, 1),
+                            "t_count": 1,
+                            "c_count": 1,
+                            "z_count": 1,
+                            "dtype": "unknown",
+                            "pixel_size_um": None,
+                        }
+                        metadata["source"] = "tifffile-skip-too-large"
+                        metadata["too_large"] = True
+                        return ThumbnailResult(pixmap=self._broken_placeholder(size), metadata=metadata)
+
+                    array = page0.asarray()
                 else:
-                    array = series.asarray()
+                    array = level.asarray(key=0)
 
             display = self._reduce_tiff_to_display(np.asarray(array), slice_request=slice_request)
             contrasted = self._auto_contrast(display)
             pixmap = self._numpy_to_fitted_qpixmap(contrasted, size)
-            metadata = self._metadata_from_tiff_array(np.asarray(array))
+            metadata = self._load_tiff_metadata(path) or self._metadata_from_tiff_array(np.asarray(array))
             metadata["source"] = "tifffile-fallback"
             return ThumbnailResult(pixmap=pixmap, metadata=metadata)
         except Exception as exc:
-            LOGGER.warning("TIFF fallback failed for %s: %s", path, exc)
+            LOGGER.debug("TIFF fallback failed for %s: %s", path, exc)
             return None
+
+    def _load_ims_thumbnail(
+        self,
+        path: Path,
+        size: int,
+        *,
+        slice_request: dict[str, Any] | None = None,
+    ) -> ThumbnailResult | None:
+        if h5py is None:
+            return None
+
+        try:
+            with h5py.File(str(path), "r") as ims_file:
+                dataset_group = ims_file.get("DataSet")
+                if dataset_group is None:
+                    return None
+
+                resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
+                if resolution_name is None:
+                    return None
+
+                resolution_group = dataset_group[resolution_name]
+                time_name = self._pick_last_numbered_key(resolution_group.keys(), "TimePoint", choose_last=False)
+                if time_name is None:
+                    return None
+                time_group = resolution_group[time_name]
+
+                channel_names = self._sorted_numbered_keys(time_group.keys(), "Channel")
+                if not channel_names:
+                    return None
+
+                planes: list[np.ndarray] = []
+                for channel_name in channel_names[:3]:
+                    channel_group = time_group[channel_name]
+                    data_ds = channel_group.get("Data")
+                    if data_ds is None:
+                        continue
+                    plane = self._ims_read_preview_plane(data_ds, slice_request=slice_request)
+                    if plane is not None:
+                        planes.append(plane)
+
+                if not planes:
+                    return None
+
+                if len(planes) == 1:
+                    display = planes[0]
+                else:
+                    min_h = min(p.shape[0] for p in planes)
+                    min_w = min(p.shape[1] for p in planes)
+                    resized = [p[:min_h, :min_w] for p in planes]
+                    rgb = np.zeros((min_h, min_w, 3), dtype=np.float32)
+                    rgb[:, :, 2] = resized[0]
+                    rgb[:, :, 1] = resized[1] if len(resized) > 1 else 0
+                    rgb[:, :, 0] = resized[2] if len(resized) > 2 else 0
+                    display = rgb
+
+                contrasted = self._auto_contrast(display)
+                pixmap = self._numpy_to_fitted_qpixmap(contrasted, size)
+                metadata = self._load_ims_metadata(path) or {
+                    "shape_tczyx": (1, len(planes), 1, contrasted.shape[0], contrasted.shape[1]),
+                    "t_count": 1,
+                    "c_count": len(planes),
+                    "z_count": 1,
+                    "dtype": "unknown",
+                    "pixel_size_um": None,
+                }
+                metadata["source"] = "ims-hdf5"
+                return ThumbnailResult(pixmap=pixmap, metadata=metadata)
+        except Exception as exc:
+            LOGGER.debug("IMS fallback failed for %s: %s", path, exc)
+            return None
+
+    def _load_ims_metadata(self, path: Path) -> dict[str, Any] | None:
+        if h5py is None:
+            return None
+
+        try:
+            with h5py.File(str(path), "r") as ims_file:
+                dataset_group = ims_file.get("DataSet")
+                if dataset_group is None:
+                    return None
+
+                resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
+                if resolution_name is None:
+                    return None
+
+                resolution_group = dataset_group[resolution_name]
+                time_names = self._sorted_numbered_keys(resolution_group.keys(), "TimePoint")
+                if not time_names:
+                    return None
+
+                first_time = resolution_group[time_names[0]]
+                channel_names = self._sorted_numbered_keys(first_time.keys(), "Channel")
+                if not channel_names:
+                    return None
+
+                data_ds = first_time[channel_names[0]].get("Data")
+                if data_ds is None:
+                    return None
+
+                shape = tuple(int(v) for v in data_ds.shape)
+                if len(shape) >= 3:
+                    z_count = int(shape[0])
+                    y = int(shape[-2])
+                    x = int(shape[-1])
+                elif len(shape) == 2:
+                    z_count = 1
+                    y = int(shape[0])
+                    x = int(shape[1])
+                else:
+                    z_count = 1
+                    y = x = 1
+
+                return {
+                    "shape_tczyx": (len(time_names), len(channel_names), z_count, y, x),
+                    "t_count": len(time_names),
+                    "c_count": len(channel_names),
+                    "z_count": z_count,
+                    "dtype": str(data_ds.dtype),
+                    "pixel_size_um": None,
+                }
+        except Exception as exc:
+            LOGGER.debug("IMS metadata fallback failed for %s: %s", path, exc)
+            return None
+
+    def _ims_read_preview_plane(
+        self,
+        dataset,
+        *,
+        slice_request: dict[str, Any] | None = None,
+    ) -> np.ndarray | None:
+        shape = tuple(int(v) for v in getattr(dataset, "shape", ()))
+        if len(shape) < 2:
+            return None
+
+        try:
+            if len(shape) >= 3:
+                z_len = int(shape[0])
+                z_idx = z_len // 2
+                if slice_request and slice_request.get("mode") == "z":
+                    z_idx = int(slice_request.get("index", z_idx))
+                z_idx = max(0, min(z_idx, z_len - 1))
+                plane = dataset[z_idx, ...]
+            else:
+                plane = dataset[...]
+
+            arr = np.asarray(plane, dtype=np.float32)
+            if arr.ndim > 2:
+                arr = np.squeeze(arr)
+                if arr.ndim > 2:
+                    arr = arr[0]
+
+            if arr.ndim != 2:
+                return None
+
+            pixels = int(arr.shape[0] * arr.shape[1])
+            if pixels > self._max_ims_plane_pixels:
+                step = int(np.ceil(np.sqrt(pixels / self._max_ims_plane_pixels)))
+                step = max(step, 1)
+                arr = arr[::step, ::step]
+
+            return arr
+        except Exception:
+            return None
+
+    def _pick_last_numbered_key(self, keys, prefix: str, *, choose_last: bool = True) -> str | None:
+        sorted_keys = self._sorted_numbered_keys(keys, prefix)
+        if not sorted_keys:
+            return None
+        return sorted_keys[-1] if choose_last else sorted_keys[0]
+
+    def _sorted_numbered_keys(self, keys, prefix: str) -> list[str]:
+        parsed: list[tuple[int, str]] = []
+        for key in keys:
+            if not isinstance(key, str):
+                continue
+            if not key.startswith(prefix):
+                continue
+            suffix = key[len(prefix):].strip()
+            try:
+                parsed.append((int(suffix), key))
+            except Exception:
+                continue
+        parsed.sort(key=lambda item: item[0])
+        return [item[1] for item in parsed]
 
     def _load_tiff_metadata(self, path: Path) -> dict[str, Any] | None:
         if tifffile is None:
@@ -209,11 +463,41 @@ class ImageEngine:
             with tifffile.TiffFile(str(path)) as tiff:
                 if not tiff.series:
                     return None
-                array = tiff.series[0].asarray()
-            return self._metadata_from_tiff_array(np.asarray(array))
+                series = tiff.series[0]
+                shape = tuple(int(v) for v in getattr(series, "shape", ()) if isinstance(v, (int, np.integer)))
+                dtype = getattr(series, "dtype", np.dtype("uint8"))
+            return self._metadata_from_tiff_shape(shape, np.dtype(dtype))
         except Exception as exc:
-            LOGGER.warning("TIFF metadata fallback failed for %s: %s", path, exc)
+            LOGGER.debug("TIFF metadata fallback failed for %s: %s", path, exc)
             return None
+
+    def _metadata_from_tiff_shape(self, shape: tuple[int, ...], dtype: np.dtype) -> dict[str, Any]:
+        t_count = 1
+        c_count = 1
+        z_count = 1
+
+        if len(shape) == 5:
+            t_count, c_count, z_count, y, x = int(shape[0]), int(shape[1]), int(shape[2]), int(shape[3]), int(shape[4])
+        elif len(shape) == 4:
+            t_count, z_count, y, x = int(shape[0]), int(shape[1]), int(shape[2]), int(shape[3])
+        elif len(shape) == 3:
+            if int(shape[-1]) in (3, 4):
+                c_count, y, x = int(shape[-1]), int(shape[0]), int(shape[1])
+            else:
+                z_count, y, x = int(shape[0]), int(shape[1]), int(shape[2])
+        elif len(shape) == 2:
+            y, x = int(shape[0]), int(shape[1])
+        else:
+            y = x = 1
+
+        return {
+            "shape_tczyx": (t_count, c_count, z_count, y, x),
+            "t_count": t_count,
+            "c_count": c_count,
+            "z_count": z_count,
+            "dtype": str(dtype),
+            "pixel_size_um": None,
+        }
 
     def _metadata_from_tiff_array(self, arr: np.ndarray) -> dict[str, Any]:
         arr = np.asarray(arr)

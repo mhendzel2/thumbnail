@@ -34,6 +34,7 @@ IMAGE_FILTERS = [
     "*.jpeg",
     "*.png",
     "*.webp",
+    "*.ims",
     "*.czi",
     "*.nd2",
     "*.tif",
@@ -136,10 +137,11 @@ class MainWindow(QMainWindow):
         self.cache_manager = CacheManager()
         self.image_engine = ImageEngine()
         self.thread_pool = QThreadPool(self)
+        self.thread_pool.setMaxThreadCount(4)
 
         self._thumbnail_size = 160
         self._quicklook_size = 900
-        self._initial_prefetch_count = 180
+        self._initial_prefetch_count = 48
         self._folder_open_started_at: float = 0.0
         self._in_flight: set[str] = set()
         self._metadata_in_flight: set[str] = set()
