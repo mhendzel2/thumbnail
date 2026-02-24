@@ -1,9 +1,9 @@
 PyQt6
-numpy<2
-h5py
-zarr
-aicsimageio
+pyqtdarktheme
+bioio
+bioio-czi
+bioio-nd2
+bioio-ome-tiff
+numpy
+Pillow
 diskcache
-numcodecs<0.16
-readlif>=0.6.4
-bioformats_jar
