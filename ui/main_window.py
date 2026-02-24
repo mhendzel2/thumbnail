@@ -168,17 +168,10 @@ class MainWindow(QMainWindow):
 
         self._setup_metadata_dock()
 
-        fs_root_index = self.model.index("")
-        if not fs_root_index.isValid():
-            fs_root_index = self.model.index(QDir.rootPath())
-
-        initial_browse_path = str(Path.home())
-        initial_browse_index = self.model.index(initial_browse_path)
-        if not initial_browse_index.isValid():
-            initial_browse_index = fs_root_index
+        fs_root_index = QModelIndex()
 
         self.tree_view.setRootIndex(fs_root_index)
-        self.list_view.setRootIndex(initial_browse_index)
+        self.list_view.setRootIndex(fs_root_index)
 
         tree_selection = self.tree_view.selectionModel()
         if tree_selection is not None:
@@ -270,6 +263,10 @@ class MainWindow(QMainWindow):
             return
 
         file_path = self.model.filePath(current)
+        if Path(file_path).is_dir():
+            self.metadata_text.setPlainText(f"Path: {file_path}\n\nType: Folder")
+            return
+
         cached = self._file_metadata.get(file_path)
         if cached:
             self._render_metadata(file_path, cached)
@@ -315,6 +312,9 @@ class MainWindow(QMainWindow):
         slice_request: dict | None = None,
         extra: dict | None = None,
     ) -> None:
+        if Path(file_path).is_dir():
+            return
+
         request_size = size if size is not None else self._thumbnail_size
         key = self._cache_key(file_path, request_size, slice_request=slice_request)
 
@@ -412,6 +412,10 @@ class MainWindow(QMainWindow):
         self.metadata_text.setPlainText(text)
 
     def _open_quicklook(self, file_path: str) -> None:
+        if self._quicklook_dialog.isVisible():
+            self._quicklook_dialog.close()
+            return
+
         cached = self.cache_manager.get(self._cache_key(file_path, self._quicklook_size))
         if cached is not None:
             self._quicklook_dialog.set_pixmap(cached)

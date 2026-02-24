@@ -6,6 +6,11 @@ from threading import RLock
 from typing import Any
 
 from diskcache import Cache
+from PyQt6.QtCore import QBuffer, QByteArray, QIODevice
+from PyQt6.QtGui import QPixmap
+
+
+PIXMAP_DISK_TAG = "__qt_pixmap_png__"
 
 
 class LruMemoryCache:
@@ -58,12 +63,14 @@ class CacheManager:
 
         value = self.disk.get(key, default=None)
         if value is not None:
-            self.memory.set(key, value)
-        return value
+            restored = self._deserialize_disk_value(value)
+            self.memory.set(key, restored)
+            return restored
+        return None
 
     def set(self, key: str, value: Any) -> None:
         self.memory.set(key, value)
-        self.disk.set(key, value)
+        self.disk.set(key, self._serialize_disk_value(value))
 
     def delete(self, key: str) -> None:
         self.memory.delete(key)
@@ -105,3 +112,24 @@ class CacheManager:
 
     def close(self) -> None:
         self.disk.close()
+
+    def _serialize_disk_value(self, value: Any) -> Any:
+        if isinstance(value, QPixmap):
+            byte_array = QByteArray()
+            buffer = QBuffer(byte_array)
+            if buffer.open(QIODevice.OpenModeFlag.WriteOnly):
+                ok = value.save(buffer, "PNG")
+                buffer.close()
+                if ok:
+                    return {PIXMAP_DISK_TAG: byte_array.data()}
+        return value
+
+    def _deserialize_disk_value(self, value: Any) -> Any:
+        if isinstance(value, dict) and PIXMAP_DISK_TAG in value:
+            raw = value.get(PIXMAP_DISK_TAG)
+            if isinstance(raw, (bytes, bytearray)):
+                pixmap = QPixmap()
+                if pixmap.loadFromData(raw, "PNG"):
+                    return pixmap
+            return None
+        return value
