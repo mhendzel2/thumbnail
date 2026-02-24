@@ -1,0 +1,53 @@
+Collecting readlif
+  Using cached readlif-0.6.6-py3-none-any.whl.metadata (4.5 kB)
+Collecting bioformats_jar
+  Using cached bioformats_jar-2020.5.27-py3-none-any.whl.metadata (2.8 kB)
+Collecting beautifulsoup4>=4.12.3 (from readlif)
+  Using cached beautifulsoup4-4.14.3-py3-none-any.whl.metadata (3.8 kB)
+Collecting numpy>=2.0.0 (from readlif)
+  Using cached numpy-2.4.2-cp312-cp312-win_amd64.whl.metadata (6.6 kB)
+Requirement already satisfied: pillow>=7.2.0 in .\.venv\Lib\site-packages (from readlif) (12.1.0)
+Collecting scyjava (from bioformats_jar)
+  Downloading scyjava-1.12.2-py3-none-any.whl.metadata (24 kB)
+Collecting soupsieve>=1.6.1 (from beautifulsoup4>=4.12.3->readlif)
+  Downloading soupsieve-2.8.3-py3-none-any.whl.metadata (4.6 kB)
+Requirement already satisfied: typing-extensions>=4.0.0 in .\.venv\Lib\site-packages (from beautifulsoup4>=4.12.3->readlif) (4.15.0)
+Collecting jpype1>=1.3.0 (from scyjava->bioformats_jar)
+  Downloading jpype1-1.6.0-cp312-cp312-win_amd64.whl.metadata (5.1 kB)
+Collecting jgo (from scyjava->bioformats_jar)
+  Downloading jgo-1.1.0-py3-none-any.whl.metadata (11 kB)
+Collecting cjdk (from scyjava->bioformats_jar)
+  Downloading cjdk-0.5.0-py3-none-any.whl.metadata (2.6 kB)
+Requirement already satisfied: packaging in .\.venv\Lib\site-packages (from jpype1>=1.3.0->scyjava->bioformats_jar) (26.0)
+Requirement already satisfied: click>=8.0 in .\.venv\Lib\site-packages (from cjdk->scyjava->bioformats_jar) (8.3.1)
+Collecting progressbar2>=4.0 (from cjdk->scyjava->bioformats_jar)
+  Using cached progressbar2-4.5.0-py3-none-any.whl.metadata (16 kB)
+Requirement already satisfied: requests>=2.24 in .\.venv\Lib\site-packages (from cjdk->scyjava->bioformats_jar) (2.32.5)
+Requirement already satisfied: colorama in .\.venv\Lib\site-packages (from click>=8.0->cjdk->scyjava->bioformats_jar) (0.4.6)
+Collecting python-utils>=3.8.1 (from progressbar2>=4.0->cjdk->scyjava->bioformats_jar)
+  Using cached python_utils-3.9.1-py2.py3-none-any.whl.metadata (9.8 kB)
+Requirement already satisfied: charset_normalizer<4,>=2 in .\.venv\Lib\site-packages (from requests>=2.24->cjdk->scyjava->bioformats_jar) (3.4.4)
+Requirement already satisfied: idna<4,>=2.5 in .\.venv\Lib\site-packages (from requests>=2.24->cjdk->scyjava->bioformats_jar) (3.11)
+Requirement already satisfied: urllib3<3,>=1.21.1 in .\.venv\Lib\site-packages (from requests>=2.24->cjdk->scyjava->bioformats_jar) (1.26.20)
+Requirement already satisfied: certifi>=2017.4.17 in .\.venv\Lib\site-packages (from requests>=2.24->cjdk->scyjava->bioformats_jar) (2026.1.4)
+Collecting psutil (from jgo->scyjava->bioformats_jar)
+  Downloading psutil-7.2.2-cp37-abi3-win_amd64.whl.metadata (22 kB)
+Using cached readlif-0.6.6-py3-none-any.whl (24 kB)
+Using cached bioformats_jar-2020.5.27-py3-none-any.whl (10 kB)
+Using cached beautifulsoup4-4.14.3-py3-none-any.whl (107 kB)
+Using cached numpy-2.4.2-cp312-cp312-win_amd64.whl (12.3 MB)
+Downloading soupsieve-2.8.3-py3-none-any.whl (37 kB)
+Downloading scyjava-1.12.2-py3-none-any.whl (39 kB)
+Downloading jpype1-1.6.0-cp312-cp312-win_amd64.whl (355 kB)
+Downloading cjdk-0.5.0-py3-none-any.whl (27 kB)
+Using cached progressbar2-4.5.0-py3-none-any.whl (57 kB)
+Using cached python_utils-3.9.1-py2.py3-none-any.whl (32 kB)
+Downloading jgo-1.1.0-py3-none-any.whl (15 kB)
+Downloading psutil-7.2.2-cp37-abi3-win_amd64.whl (137 kB)
+Installing collected packages: soupsieve, python-utils, psutil, numpy, jpype1, progressbar2, jgo, beautifulsoup4, readlif, cjdk, scyjava, bioformats_jar
+  Attempting uninstall: numpy
+    Found existing installation: numpy 1.26.4
+    Uninstalling numpy-1.26.4:
+      Successfully uninstalled numpy-1.26.4
+
+Successfully installed beautifulsoup4-4.14.3 bioformats_jar-2020.5.27 cjdk-0.5.0 jgo-1.1.0 jpype1-1.6.0 numpy-2.4.2 progressbar2-4.5.0 psutil-7.2.2 python-utils-3.9.1 readlif-0.6.6 scyjava-1.12.2 soupsieve-2.8.3
