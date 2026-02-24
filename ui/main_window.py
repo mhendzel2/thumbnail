@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import subprocess
+import time
 
-from PyQt6.QtCore import QDir, QModelIndex, QPoint, QThreadPool, Qt, pyqtSignal
+from PyQt6.QtCore import QDir, QModelIndex, QPoint, QThreadPool, Qt, QTimer, pyqtSignal
 from PyQt6.QtGui import QFileSystemModel
 from PyQt6.QtWidgets import (
     QApplication,
@@ -15,6 +16,7 @@ from PyQt6.QtWidgets import (
     QListView,
     QMainWindow,
     QPlainTextEdit,
+    QStatusBar,
     QSplitter,
     QTreeView,
     QVBoxLayout,
@@ -137,6 +139,8 @@ class MainWindow(QMainWindow):
 
         self._thumbnail_size = 160
         self._quicklook_size = 900
+        self._initial_prefetch_count = 180
+        self._folder_open_started_at: float = 0.0
         self._in_flight: set[str] = set()
         self._metadata_in_flight: set[str] = set()
         self._file_metadata: dict[str, dict] = {}
@@ -165,6 +169,11 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(splitter)
         self.setCentralWidget(container)
+        self._status_bar = QStatusBar(self)
+        self.setStatusBar(self._status_bar)
+        self._status_bar.showMessage(
+            f"Ready — folder cache database: {self.cache_manager.cache_db_path()}"
+        )
 
         self._setup_metadata_dock()
 
@@ -186,6 +195,8 @@ class MainWindow(QMainWindow):
         self.list_view.scrubRequested.connect(self._on_scrub_request)
         self.list_view.contextMenuRequested.connect(self._show_context_menu)
         self.list_view.setMouseTracking(True)
+        self.model.directoryLoaded.connect(self._on_directory_loaded)
+        self._prime_folder_thumbnails()
         self._queue_visible_thumbnails()
 
     def _setup_metadata_dock(self) -> None:
@@ -215,6 +226,8 @@ class MainWindow(QMainWindow):
         view = ThumbnailListView(self)
         view.setModel(self.model)
         view.setViewMode(QListView.ViewMode.IconMode)
+        view.setLayoutMode(QListView.LayoutMode.Batched)
+        view.setBatchSize(120)
         view.setFlow(QListView.Flow.LeftToRight)
         view.setResizeMode(QListView.ResizeMode.Adjust)
         view.setWrapping(True)
@@ -254,8 +267,20 @@ class MainWindow(QMainWindow):
         if not Path(path).is_dir():
             return
 
+        self._folder_open_started_at = time.perf_counter()
+        previous_record = self.cache_manager.get_folder_record(path)
+        if previous_record:
+            prev_count = previous_record.get("item_count", "?")
+            prev_time = previous_record.get("last_loaded", "")
+            self._status_bar.showMessage(
+                f"Opening folder: {path} (seen before, last items: {prev_count}, at {prev_time})"
+            )
+        else:
+            self._status_bar.showMessage(f"Opening folder: {path} (first load)")
+
         new_root = self.model.index(path)
         self.list_view.setRootIndex(new_root)
+        self._prime_folder_thumbnails()
         self._queue_visible_thumbnails()
 
     def _on_list_current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
@@ -286,11 +311,8 @@ class MainWindow(QMainWindow):
             return
         viewport_rect = viewport.rect()
         top_left = self.list_view.indexAt(viewport_rect.topLeft())
-        if not top_left.isValid():
-            return
-
         bottom_right = self.list_view.indexAt(QPoint(viewport_rect.right(), viewport_rect.bottom()))
-        row = top_left.row()
+        row = top_left.row() if top_left.isValid() else 0
         if not bottom_right.isValid():
             bottom_row = min(row + 120, self.model.rowCount(self.list_view.rootIndex()) - 1)
         else:
@@ -302,6 +324,45 @@ class MainWindow(QMainWindow):
             if not idx.isValid():
                 continue
             self._request_thumbnail(self.model.filePath(idx), idx)
+
+    def _prime_folder_thumbnails(self) -> None:
+        root_index = self.list_view.rootIndex()
+        row_count = self.model.rowCount(root_index)
+        if row_count <= 0:
+            return
+
+        self._status_bar.showMessage(f"Prefetching thumbnails… {row_count} entries detected")
+
+        max_row = min(row_count, self._initial_prefetch_count)
+        for row in range(max_row):
+            idx = self.model.index(row, 0, root_index)
+            if idx.isValid():
+                self._request_thumbnail(self.model.filePath(idx), idx)
+
+        QTimer.singleShot(80, self._queue_visible_thumbnails)
+
+    def _on_directory_loaded(self, path: str) -> None:
+        current_root = self.model.filePath(self.list_view.rootIndex())
+        if current_root and path == current_root:
+            root_index = self.list_view.rootIndex()
+            row_count = self.model.rowCount(root_index)
+            elapsed_ms = 0.0
+            if self._folder_open_started_at > 0:
+                elapsed_ms = (time.perf_counter() - self._folder_open_started_at) * 1000.0
+
+            self.cache_manager.set_folder_record(
+                path,
+                {
+                    "item_count": row_count,
+                    "last_loaded": time.strftime("%Y-%m-%d %H:%M:%S"),
+                    "last_load_ms": round(elapsed_ms, 1),
+                },
+            )
+
+            self._status_bar.showMessage(
+                f"Loaded {row_count} entries from {path} in {elapsed_ms:.0f} ms"
+            )
+            self._prime_folder_thumbnails()
 
     def _request_thumbnail(
         self,

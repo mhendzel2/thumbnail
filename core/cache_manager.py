@@ -113,6 +113,20 @@ class CacheManager:
     def close(self) -> None:
         self.disk.close()
 
+    def cache_db_path(self) -> str:
+        return str(Path(self.disk.directory) / "cache.db")
+
+    def set_folder_record(self, folder_path: str, payload: dict[str, Any]) -> None:
+        key = self._folder_key(folder_path)
+        self.disk.set(key, payload)
+
+    def get_folder_record(self, folder_path: str) -> dict[str, Any] | None:
+        key = self._folder_key(folder_path)
+        value = self.disk.get(key, default=None)
+        if isinstance(value, dict):
+            return value
+        return None
+
     def _serialize_disk_value(self, value: Any) -> Any:
         if isinstance(value, QPixmap):
             byte_array = QByteArray()
@@ -133,3 +147,6 @@ class CacheManager:
                     return pixmap
             return None
         return value
+
+    def _folder_key(self, folder_path: str) -> str:
+        return f"folder::meta::{folder_path}"
