@@ -44,6 +44,11 @@ class ImageEngine:
         if ext in STANDARD_EXTENSIONS:
             return self._load_standard_thumbnail(path, size)
 
+        if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
+            fallback = self._load_tiff_thumbnail(path, size, slice_request=slice_request)
+            if fallback is not None:
+                return fallback
+
         if self._is_microscopy_path(path):
             return self._load_microscopy_thumbnail(path, size, slice_request=slice_request)
 
@@ -72,6 +77,12 @@ class ImageEngine:
             except Exception as exc:
                 return {"broken": True, "error": str(exc)}
 
+        if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
+            fallback = self._load_tiff_metadata(path)
+            if fallback is not None:
+                fallback["source"] = "tifffile-fallback"
+                return fallback
+
         if self._is_microscopy_path(path):
             try:
                 bio_image = self._open_bioimage(path)
@@ -97,6 +108,10 @@ class ImageEngine:
     def _is_tiff_path(self, path: Path) -> bool:
         name = path.name.lower()
         return name.endswith(".tif") or name.endswith(".tiff")
+
+    def _is_ome_tiff_path(self, path: Path) -> bool:
+        name = path.name.lower()
+        return name.endswith(".ome.tif") or name.endswith(".ome.tiff")
 
     def _load_standard_thumbnail(self, path: Path, size: int) -> ThumbnailResult:
         try:
