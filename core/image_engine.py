@@ -12,6 +12,11 @@ from PIL import Image, ImageOps
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
 
+try:
+    import tifffile
+except Exception:
+    tifffile = None
+
 LOGGER = logging.getLogger(__name__)
 
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -73,7 +78,14 @@ class ImageEngine:
                 metadata = self._collect_bio_metadata(bio_image)
                 return metadata
             except Exception as exc:
-                LOGGER.exception("Failed to read metadata for %s", file_path)
+                if self._is_tiff_path(path):
+                    fallback = self._load_tiff_metadata(path)
+                    if fallback is not None:
+                        fallback["source"] = "tifffile-fallback"
+                        fallback["bioio_error"] = str(exc)
+                        return fallback
+
+                LOGGER.warning("Failed to read metadata for %s: %s", file_path, exc)
                 return {"broken": True, "error": str(exc)}
 
         return {"broken": True, "error": "Unsupported file format"}
@@ -81,6 +93,10 @@ class ImageEngine:
     def _is_microscopy_path(self, path: Path) -> bool:
         name = path.name.lower()
         return name.endswith(".ome.tif") or name.endswith(".ome.tiff") or path.suffix.lower() in MICROSCOPY_EXTENSIONS
+
+    def _is_tiff_path(self, path: Path) -> bool:
+        name = path.name.lower()
+        return name.endswith(".tif") or name.endswith(".tiff")
 
     def _load_standard_thumbnail(self, path: Path, size: int) -> ThumbnailResult:
         try:
@@ -127,11 +143,146 @@ class ImageEngine:
             metadata["source"] = "bioio"
             return ThumbnailResult(pixmap=pixmap, metadata=metadata)
         except Exception as exc:
-            LOGGER.exception("Failed microscopy decode for %s", path)
+            if self._is_tiff_path(path):
+                fallback = self._load_tiff_thumbnail(path, size, slice_request=slice_request)
+                if fallback is not None:
+                    fallback.metadata["bioio_error"] = str(exc)
+                    return fallback
+
+            LOGGER.warning("Failed microscopy decode for %s: %s", path, exc)
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": str(exc)},
             )
+
+    def _load_tiff_thumbnail(
+        self,
+        path: Path,
+        size: int,
+        *,
+        slice_request: dict[str, Any] | None = None,
+    ) -> ThumbnailResult | None:
+        if tifffile is None:
+            return None
+
+        try:
+            with tifffile.TiffFile(str(path)) as tiff:
+                if not tiff.series:
+                    return None
+
+                series = tiff.series[0]
+                if hasattr(series, "levels") and series.levels:
+                    array = series.levels[-1].asarray()
+                else:
+                    array = series.asarray()
+
+            display = self._reduce_tiff_to_display(np.asarray(array), slice_request=slice_request)
+            contrasted = self._auto_contrast(display)
+            pixmap = self._numpy_to_fitted_qpixmap(contrasted, size)
+            metadata = self._metadata_from_tiff_array(np.asarray(array))
+            metadata["source"] = "tifffile-fallback"
+            return ThumbnailResult(pixmap=pixmap, metadata=metadata)
+        except Exception as exc:
+            LOGGER.warning("TIFF fallback failed for %s: %s", path, exc)
+            return None
+
+    def _load_tiff_metadata(self, path: Path) -> dict[str, Any] | None:
+        if tifffile is None:
+            return None
+
+        try:
+            with tifffile.TiffFile(str(path)) as tiff:
+                if not tiff.series:
+                    return None
+                array = tiff.series[0].asarray()
+            return self._metadata_from_tiff_array(np.asarray(array))
+        except Exception as exc:
+            LOGGER.warning("TIFF metadata fallback failed for %s: %s", path, exc)
+            return None
+
+    def _metadata_from_tiff_array(self, arr: np.ndarray) -> dict[str, Any]:
+        arr = np.asarray(arr)
+        t_count = 1
+        c_count = 1
+        z_count = 1
+
+        if arr.ndim == 5:
+            t_count, c_count, z_count = int(arr.shape[0]), int(arr.shape[1]), int(arr.shape[2])
+            y, x = int(arr.shape[3]), int(arr.shape[4])
+        elif arr.ndim == 4:
+            t_count = int(arr.shape[0])
+            z_count = int(arr.shape[1])
+            y, x = int(arr.shape[2]), int(arr.shape[3])
+        elif arr.ndim == 3:
+            if arr.shape[-1] in (3, 4):
+                c_count = int(arr.shape[-1])
+                y, x = int(arr.shape[0]), int(arr.shape[1])
+            else:
+                z_count = int(arr.shape[0])
+                y, x = int(arr.shape[1]), int(arr.shape[2])
+        elif arr.ndim == 2:
+            y, x = int(arr.shape[0]), int(arr.shape[1])
+        else:
+            y = x = 1
+
+        return {
+            "shape_tczyx": (t_count, c_count, z_count, y, x),
+            "t_count": t_count,
+            "c_count": c_count,
+            "z_count": z_count,
+            "dtype": str(arr.dtype),
+            "pixel_size_um": None,
+        }
+
+    def _reduce_tiff_to_display(
+        self,
+        arr: np.ndarray,
+        *,
+        slice_request: dict[str, Any] | None = None,
+    ) -> np.ndarray:
+        data = np.asarray(arr)
+
+        while data.ndim > 5:
+            data = data[0]
+
+        if data.ndim == 5:
+            t_idx = 0
+            if slice_request and slice_request.get("mode") == "t":
+                t_idx = int(slice_request.get("index", 0))
+                t_idx = max(0, min(t_idx, data.shape[0] - 1))
+            data = data[t_idx]
+
+        if data.ndim == 4:
+            z_idx = 0
+            if slice_request and slice_request.get("mode") == "z":
+                z_idx = int(slice_request.get("index", 0))
+                z_idx = max(0, min(z_idx, data.shape[1] - 1))
+                data = data[:, z_idx, :, :]
+            else:
+                data = np.max(data, axis=1)
+
+        if data.ndim == 3:
+            if data.shape[-1] in (3, 4):
+                return data[..., :3]
+
+            if data.shape[0] == 1:
+                return data[0]
+
+            if data.shape[0] in (3, 4):
+                rgb = np.zeros((data.shape[1], data.shape[2], 3), dtype=np.float32)
+                rgb[:, :, 2] = data[0]
+                rgb[:, :, 1] = data[1] if data.shape[0] > 1 else 0
+                rgb[:, :, 0] = data[2] if data.shape[0] > 2 else 0
+                return rgb
+
+            if slice_request and slice_request.get("mode") == "z":
+                z_idx = int(slice_request.get("index", 0))
+                z_idx = max(0, min(z_idx, data.shape[0] - 1))
+                return data[z_idx]
+
+            return np.max(data, axis=0)
+
+        return np.squeeze(data)
 
     def _open_bioimage(self, path: Path):
         module = importlib.import_module("bioio")
