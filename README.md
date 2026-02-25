@@ -17,7 +17,7 @@ A PyQt6 desktop thumbnail browser optimized for mixed datasets (standard images 
 ## Supported file families
 
 - Standard: `.jpg`, `.jpeg`, `.png`, `.webp`, `.psd`
-- Microscopy: `.ims`, `.czi`, `.nd2`, `.stk`, `.tif`, `.tiff`, `.ome.tif`, `.ome.tiff`
+- Microscopy: `.ims`, `.czi`, `.nd2`, `.stk`, `.tif`, `.tiff`, `.ome.tif`, `.ome.tiff`, `.mvd2`, `.acff`
 
 ## Installation
 
@@ -45,6 +45,7 @@ start.bat
 
 - Large non-OME TIFF/STK files use memory-safe fallback paths to avoid full-array allocations.
 - IMS files use an HDF5 low-resolution path when available (`h5py`) with BioIO fallback.
+- Volocity `.mvd2` and Volocity Library Clipping `.acff` use BioIO + Bio-Formats plugin support.
 - Folder load state is persisted in the cache database under `~/.microscopy_cache`.
 
 ## Troubleshooting
@@ -57,6 +58,11 @@ start.bat
 - **Console shows BioIO unsupported format messages for TIFF/STK**
 	- Non-OME TIFF/STK files are routed through fallback readers first.
 	- If a file is malformed or extremely large, a placeholder may be shown instead of crashing.
+
+- **Volocity files (`.mvd2` / `.acff`) do not open**
+	- Re-run `install.bat` to ensure `bioio-bioformats` is installed in `.venv`.
+	- Verify with:
+		- `.venv\Scripts\python.exe -c "import bioio, bioio_bioformats; print('ok')"`
 
 - **App slows down on huge drive roots**
 	- Use file-type toggles and the search box to reduce active thumbnail workload.

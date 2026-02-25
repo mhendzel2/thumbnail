@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import os
 import time
-from typing import Any
+from typing import Any, Callable
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
 
@@ -90,12 +90,23 @@ class DriveScanWorker(QRunnable):
         supported_suffixes: tuple[str, ...],
     ) -> None:
         super().__init__()
+        self.setAutoDelete(False)
         self.engine = engine
         self.cache_manager = cache_manager
         self.drive_root = drive_root
         self.thumbnail_size = thumbnail_size
         self.supported_suffixes = tuple(s.lower() for s in supported_suffixes)
         self.signals = DriveScanSignals()
+        self._stop_requested = False
+
+    def request_stop(self) -> None:
+        self._stop_requested = True
+
+    def _safe_emit(self, emitter: Callable, *args) -> None:
+        try:
+            emitter(*args)
+        except RuntimeError:
+            pass
 
     def run(self) -> None:
         started = time.perf_counter()
@@ -105,7 +116,13 @@ class DriveScanWorker(QRunnable):
 
         try:
             for dir_path, _dir_names, file_names in os.walk(self.drive_root):
+                if self._stop_requested:
+                    return
+
                 for file_name in file_names:
+                    if self._stop_requested:
+                        return
+
                     lower = file_name.lower()
                     if not any(lower.endswith(suffix) for suffix in self.supported_suffixes):
                         continue
@@ -124,18 +141,22 @@ class DriveScanWorker(QRunnable):
                             self.thumbnail_size,
                             include_metadata=False,
                         )
+                        if bool(result.metadata.get("broken")):
+                            continue
                         self.cache_manager.set(cache_key, result.pixmap)
                         generated += 1
                     except Exception:
                         continue
 
                     if scanned % 50 == 0:
-                        self.signals.progress.emit(
+                        self._safe_emit(
+                            self.signals.progress.emit,
                             f"Drive scan {self.drive_root}: scanned {scanned} files, cached {generated}"
                         )
 
             elapsed_s = round(time.perf_counter() - started, 1)
-            self.signals.finished.emit(
+            self._safe_emit(
+                self.signals.finished.emit,
                 self.drive_root,
                 {
                     "scanned": scanned,
@@ -145,4 +166,4 @@ class DriveScanWorker(QRunnable):
                 },
             )
         except Exception as exc:
-            self.signals.error.emit(self.drive_root, str(exc))
+            self._safe_emit(self.signals.error.emit, self.drive_root, str(exc))

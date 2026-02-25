@@ -18,6 +18,7 @@ def build() -> None:
             "--windowed",
             "--clean",
             "--hidden-import=bioio",
+            "--hidden-import=bioio_bioformats",
             "--hidden-import=bioio_czi",
             "--hidden-import=bioio_nd2",
             "--hidden-import=bioio_ome_tiff",

@@ -46,6 +46,8 @@ IMAGE_FILTERS = [
     "*.tiff",
     "*.ome.tif",
     "*.ome.tiff",
+    "*.mvd2",
+    "*.acff",
 ]
 
 FILE_TYPE_GROUPS = {
@@ -55,10 +57,13 @@ FILE_TYPE_GROUPS = {
     "PSD": {".psd"},
     "PNG": {".png"},
     "JPG": {".jpg", ".jpeg"},
+    "VOLOCITY": {".mvd2", ".acff"},
 }
 
 
 class QuickLookDialog(QDialog):
+    wheelSliceRequested = pyqtSignal(int, bool)
+
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
@@ -74,6 +79,20 @@ class QuickLookDialog(QDialog):
 
     def set_pixmap(self, pixmap) -> None:
         self.label.setPixmap(pixmap)
+
+    def wheelEvent(self, a0) -> None:
+        if a0 is None:
+            return
+
+        delta = a0.angleDelta().y()
+        if delta == 0:
+            a0.ignore()
+            return
+
+        modifiers = a0.modifiers()
+        ctrl_down = bool(modifiers & Qt.KeyboardModifier.ControlModifier)
+        self.wheelSliceRequested.emit(delta, ctrl_down)
+        a0.accept()
 
 
 class ThumbnailListView(QListView):
@@ -225,12 +244,15 @@ class MainWindow(QMainWindow):
         self._supported_scan_suffixes = tuple(pattern.replace("*", "").lower() for pattern in IMAGE_FILTERS)
         self._drive_scan_enabled = bool(self.cache_manager.get_setting("drive_scan_enabled", False))
         self._drive_scans_in_flight: set[str] = set()
+        self._drive_scan_workers: dict[str, DriveScanWorker] = {}
 
         self._in_flight: set[str] = set()
         self._metadata_in_flight: set[str] = set()
         self._file_metadata: dict[str, dict] = {}
         self._last_scrub: dict[str, tuple[str, int]] = {}
         self._quicklook_dialog = QuickLookDialog(self)
+        self._quicklook_file_path: str = ""
+        self._quicklook_indices: dict[str, dict[str, int]] = {}
 
         self.tree_model = QFileSystemModel(self)
         self.tree_model.setIconProvider(QFileIconProvider())
@@ -293,6 +315,7 @@ class MainWindow(QMainWindow):
         self.list_view.scrubRequested.connect(self._on_scrub_request)
         self.list_view.contextMenuRequested.connect(self._show_context_menu)
         self.list_view.navigateUpRequested.connect(self._navigate_up_one_folder)
+        self._quicklook_dialog.wheelSliceRequested.connect(self._on_quicklook_wheel_slice)
         self.list_view.setMouseTracking(True)
 
         self.list_model.directoryLoaded.connect(self._on_directory_loaded)
@@ -365,7 +388,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.search_input, 1)
 
         self.type_checkboxes: dict[str, QCheckBox] = {}
-        for label in ("TIFF", "IMS", "STK", "PSD", "PNG", "JPG"):
+        for label in ("TIFF", "IMS", "STK", "PSD", "PNG", "JPG", "VOLOCITY"):
             checkbox = QCheckBox(label, controls)
             checkbox.setChecked(True)
             checkbox.toggled.connect(lambda checked, name=label: self._on_type_toggled(name, checked))
@@ -518,6 +541,7 @@ class MainWindow(QMainWindow):
             self._thumbnail_size,
             self._supported_scan_suffixes,
         )
+        self._drive_scan_workers[drive_root] = worker
         worker.signals.progress.connect(self._on_drive_scan_progress)
         worker.signals.finished.connect(self._on_drive_scan_finished)
         worker.signals.error.connect(self._on_drive_scan_error)
@@ -529,6 +553,7 @@ class MainWindow(QMainWindow):
 
     def _on_drive_scan_finished(self, drive_root: str, payload: dict) -> None:
         self._drive_scans_in_flight.discard(drive_root)
+        self._drive_scan_workers.pop(drive_root, None)
         record = {
             **payload,
             "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
@@ -541,6 +566,7 @@ class MainWindow(QMainWindow):
 
     def _on_drive_scan_error(self, drive_root: str, error_message: str) -> None:
         self._drive_scans_in_flight.discard(drive_root)
+        self._drive_scan_workers.pop(drive_root, None)
         self._status_bar.showMessage(f"Drive scan failed for {drive_root}: {error_message}")
 
     def _on_list_current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
@@ -685,16 +711,23 @@ class MainWindow(QMainWindow):
         self.cache_manager.set(cache_key, pixmap)
         self._in_flight.discard(cache_key)
 
+        self._file_metadata[file_path] = {**self._file_metadata.get(file_path, {}), **metadata}
+
         if bool(metadata.get("quicklook")):
             self._quicklook_dialog.set_pixmap(pixmap)
             self._quicklook_dialog.show()
             self._center_dialog(self._quicklook_dialog)
+            mode = str(metadata.get("slice_mode", "")).lower()
+            if mode in {"z", "c", "t"}:
+                idx = int(metadata.get("slice_index", 0) or 0)
+                state = self._quicklook_indices.setdefault(file_path, {})
+                state[mode] = idx
+
+            self._quicklook_file_path = file_path
             return
 
         if metadata.get("scrub"):
             self.cache_manager.set(self._cache_key(file_path), pixmap)
-
-        self._file_metadata[file_path] = {**self._file_metadata.get(file_path, {}), **metadata}
 
         source_index = self.list_model.index(file_path)
         proxy_index = self.list_proxy.mapFromSource(source_index)
@@ -757,16 +790,62 @@ class MainWindow(QMainWindow):
     def _open_quicklook(self, file_path: str) -> None:
         if self._quicklook_dialog.isVisible():
             self._quicklook_dialog.close()
+            self._quicklook_file_path = ""
             return
 
-        cached = self.cache_manager.get(self._cache_key(file_path, self._quicklook_size))
+        self._quicklook_file_path = file_path
+        state = self._quicklook_indices.get(file_path, {})
+        preferred_slice = None
+        if state.get("z", 0) > 0:
+            preferred_slice = {"mode": "z", "index": int(state["z"])}
+        elif state.get("c", 0) > 0:
+            preferred_slice = {"mode": "c", "index": int(state["c"])}
+
+        cached = self.cache_manager.get(self._cache_key(file_path, self._quicklook_size, slice_request=preferred_slice))
         if cached is not None:
             self._quicklook_dialog.set_pixmap(cached)
             self._quicklook_dialog.show()
             self._center_dialog(self._quicklook_dialog)
             return
 
-        self._request_thumbnail(file_path, size=self._quicklook_size, extra={"quicklook": True})
+        self._request_thumbnail(
+            file_path,
+            size=self._quicklook_size,
+            slice_request=preferred_slice,
+            extra={
+                "quicklook": True,
+                "slice_mode": preferred_slice.get("mode") if preferred_slice else "",
+                "slice_index": preferred_slice.get("index", 0) if preferred_slice else 0,
+            },
+        )
+
+    def _on_quicklook_wheel_slice(self, delta: int, ctrl_down: bool) -> None:
+        file_path = self._quicklook_file_path
+        if not file_path:
+            return
+
+        metadata = self._file_metadata.get(file_path, {})
+        mode = "c" if ctrl_down else "z"
+        count = int(metadata.get("c_count", 1) or 1) if mode == "c" else int(metadata.get("z_count", 1) or 1)
+        if count <= 1:
+            return
+
+        step = 1 if delta > 0 else -1
+        state = self._quicklook_indices.setdefault(file_path, {})
+        current_idx = int(state.get(mode, 0))
+        next_idx = max(0, min(current_idx + step, count - 1))
+        if next_idx == current_idx:
+            return
+
+        state[mode] = next_idx
+        self._request_thumbnail(
+            file_path,
+            size=self._quicklook_size,
+            slice_request={"mode": mode, "index": next_idx},
+            extra={"quicklook": True, "slice_mode": mode, "slice_index": next_idx},
+        )
+        axis = "C" if mode == "c" else "Z"
+        self._status_bar.showMessage(f"Quick Look {axis}: {next_idx + 1}/{count}")
 
     def _on_scrub_request(self, file_path: str, fraction: float) -> None:
         metadata = self._file_metadata.get(file_path, {})
@@ -858,6 +937,13 @@ class MainWindow(QMainWindow):
         return self.list_model.filePath(source_root)
 
     def closeEvent(self, a0) -> None:
+        for worker in list(self._drive_scan_workers.values()):
+            try:
+                worker.request_stop()
+            except Exception:
+                pass
+
         self.thread_pool.waitForDone(1500)
+        self._drive_scan_workers.clear()
         self.cache_manager.close()
         super().closeEvent(a0)

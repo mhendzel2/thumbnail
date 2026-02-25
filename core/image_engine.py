@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import importlib
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -22,7 +23,7 @@ h5py = None
 LOGGER = logging.getLogger(__name__)
 
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".psd"}
-MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".stk", ".tiff", ".tif", ".ome.tif", ".ome.tiff"}
+MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".stk", ".tiff", ".tif", ".ome.tif", ".ome.tiff", ".mvd2", ".acff"}
 
 
 @dataclass(slots=True)
@@ -299,33 +300,53 @@ class ImageEngine:
 
         try:
             with h5py_mod.File(str(path), "r") as ims_file:
-                dataset_group = ims_file.get("DataSet")
-                if dataset_group is None:
-                    return None
-
-                resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
-                if resolution_name is None:
-                    return None
-
-                resolution_group = dataset_group[resolution_name]
-                time_name = self._pick_last_numbered_key(resolution_group.keys(), "TimePoint", choose_last=False)
-                if time_name is None:
-                    return None
-                time_group = resolution_group[time_name]
-
-                channel_names = self._sorted_numbered_keys(time_group.keys(), "Channel")
-                if not channel_names:
-                    return None
-
                 planes: list[np.ndarray] = []
-                for channel_name in channel_names[:3]:
-                    channel_group = time_group[channel_name]
-                    data_ds = channel_group.get("Data")
-                    if data_ds is None:
-                        continue
-                    plane = self._ims_read_preview_plane(data_ds, slice_request=slice_request)
-                    if plane is not None:
-                        planes.append(plane)
+                channel_slice_idx = None
+                if slice_request and slice_request.get("mode") == "c":
+                    try:
+                        channel_slice_idx = int(slice_request.get("index", 0))
+                    except Exception:
+                        channel_slice_idx = 0
+                    channel_slice_idx = max(0, channel_slice_idx)
+
+                dataset_group = ims_file.get("DataSet")
+                if dataset_group is not None:
+                    resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
+                    if resolution_name is not None:
+                        resolution_group = dataset_group[resolution_name]
+                        time_name = self._pick_last_numbered_key(resolution_group.keys(), "TimePoint", choose_last=False)
+                        if time_name is not None:
+                            time_group = resolution_group[time_name]
+                            channel_names = self._sorted_numbered_keys(time_group.keys(), "Channel")
+                            selected_names = channel_names
+                            if channel_slice_idx is not None and channel_names:
+                                one = min(channel_slice_idx, len(channel_names) - 1)
+                                selected_names = [channel_names[one]]
+                            elif channel_slice_idx is None:
+                                selected_names = channel_names[:3]
+
+                            for channel_name in selected_names:
+                                channel_group = time_group[channel_name]
+                                data_ds = channel_group.get("Data")
+                                if data_ds is None:
+                                    continue
+                                plane = self._ims_read_preview_plane(data_ds, slice_request=slice_request)
+                                if plane is not None:
+                                    planes.append(plane)
+
+                if not planes:
+                    discovered = self._discover_ims_data_datasets(ims_file)
+                    selected_discovered = discovered
+                    if channel_slice_idx is not None and discovered:
+                        one = min(channel_slice_idx, len(discovered) - 1)
+                        selected_discovered = [discovered[one]]
+                    elif channel_slice_idx is None:
+                        selected_discovered = discovered[:3]
+
+                    for data_ds in selected_discovered:
+                        plane = self._ims_read_preview_plane(data_ds, slice_request=slice_request)
+                        if plane is not None:
+                            planes.append(plane)
 
                 if not planes:
                     return None
@@ -366,26 +387,34 @@ class ImageEngine:
         try:
             with h5py_mod.File(str(path), "r") as ims_file:
                 dataset_group = ims_file.get("DataSet")
-                if dataset_group is None:
-                    return None
+                data_ds = None
+                time_names: list[str] = []
+                channel_names: list[str] = []
 
-                resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
-                if resolution_name is None:
-                    return None
+                if dataset_group is not None:
+                    resolution_name = self._pick_last_numbered_key(dataset_group.keys(), "ResolutionLevel")
+                    if resolution_name is not None:
+                        resolution_group = dataset_group[resolution_name]
+                        time_names = self._sorted_numbered_keys(resolution_group.keys(), "TimePoint")
+                        if time_names:
+                            first_time = resolution_group[time_names[0]]
+                            channel_names = self._sorted_numbered_keys(first_time.keys(), "Channel")
+                            if channel_names:
+                                data_ds = first_time[channel_names[0]].get("Data")
 
-                resolution_group = dataset_group[resolution_name]
-                time_names = self._sorted_numbered_keys(resolution_group.keys(), "TimePoint")
-                if not time_names:
-                    return None
+                discovered = self._discover_ims_data_datasets(ims_file)
+                if data_ds is None and discovered:
+                    data_ds = discovered[0]
 
-                first_time = resolution_group[time_names[0]]
-                channel_names = self._sorted_numbered_keys(first_time.keys(), "Channel")
-                if not channel_names:
-                    return None
-
-                data_ds = first_time[channel_names[0]].get("Data")
                 if data_ds is None:
                     return None
+
+                if not time_names or not channel_names:
+                    parsed_time, parsed_channel = self._collect_ims_path_counts(ims_file)
+                    if not time_names and parsed_time > 0:
+                        time_names = [str(i) for i in range(parsed_time)]
+                    if not channel_names and parsed_channel > 0:
+                        channel_names = [str(i) for i in range(parsed_channel)]
 
                 shape = tuple(int(v) for v in data_ds.shape)
                 if len(shape) >= 3:
@@ -401,9 +430,9 @@ class ImageEngine:
                     y = x = 1
 
                 return {
-                    "shape_tczyx": (len(time_names), len(channel_names), z_count, y, x),
-                    "t_count": len(time_names),
-                    "c_count": len(channel_names),
+                    "shape_tczyx": (max(1, len(time_names)), max(1, len(channel_names)), z_count, y, x),
+                    "t_count": max(1, len(time_names)),
+                    "c_count": max(1, len(channel_names)),
                     "z_count": z_count,
                     "dtype": str(data_ds.dtype),
                     "pixel_size_um": None,
@@ -411,6 +440,65 @@ class ImageEngine:
         except Exception as exc:
             LOGGER.debug("IMS metadata fallback failed for %s: %s", path, exc)
             return None
+
+    def _discover_ims_data_datasets(self, ims_file) -> list[Any]:
+        discovered: list[tuple[str, Any]] = []
+
+        def _visitor(name, obj) -> None:
+            if not isinstance(name, str):
+                return
+            if not name.startswith("DataSet/") or not name.endswith("/Data"):
+                return
+            if not hasattr(obj, "shape"):
+                return
+            discovered.append((name, obj))
+
+        try:
+            ims_file.visititems(_visitor)
+        except Exception:
+            return []
+
+        discovered.sort(key=lambda pair: (self._ims_dataset_sort_key(pair[0]), pair[0]))
+        return [obj for _, obj in discovered]
+
+    def _ims_dataset_sort_key(self, name: str) -> tuple[int, int, int]:
+        level = self._extract_numbered_component(name, "ResolutionLevel")
+        time = self._extract_numbered_component(name, "TimePoint")
+        channel = self._extract_numbered_component(name, "Channel")
+        return (level, time, channel)
+
+    def _extract_numbered_component(self, text: str, prefix: str) -> int:
+        match = re.search(rf"{re.escape(prefix)}\s*(\d+)", text)
+        if not match:
+            return 0
+        try:
+            return int(match.group(1))
+        except Exception:
+            return 0
+
+    def _collect_ims_path_counts(self, ims_file) -> tuple[int, int]:
+        time_indices: set[int] = set()
+        channel_indices: set[int] = set()
+
+        def _visitor(name, obj) -> None:
+            if not isinstance(name, str):
+                return
+            if not name.startswith("DataSet/") or not name.endswith("/Data"):
+                return
+            if not hasattr(obj, "shape"):
+                return
+
+            time_idx = self._extract_numbered_component(name, "TimePoint")
+            channel_idx = self._extract_numbered_component(name, "Channel")
+            time_indices.add(time_idx)
+            channel_indices.add(channel_idx)
+
+        try:
+            ims_file.visititems(_visitor)
+        except Exception:
+            return (0, 0)
+
+        return (len(time_indices), len(channel_indices))
 
     def _ims_read_preview_plane(
         self,
@@ -697,6 +785,11 @@ class ImageEngine:
             c_count = int(metadata.get("c_count", arr.shape[0]))
             if c_count <= 1 or arr.shape[0] == 1:
                 return arr[0]
+
+            if slice_request and slice_request.get("mode") == "c":
+                c_index = int(slice_request.get("index", 0))
+                c_index = max(0, min(c_index, arr.shape[0] - 1))
+                return arr[c_index]
 
             y, x = arr.shape[1], arr.shape[2]
             rgb = np.zeros((y, x, 3), dtype=np.float32)

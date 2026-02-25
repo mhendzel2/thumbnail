@@ -1,6 +1,7 @@
 PyQt6
 pyqtdarktheme
 bioio
+bioio-bioformats
 bioio-czi
 bioio-nd2
 bioio-ome-tiff
