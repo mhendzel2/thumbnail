@@ -242,6 +242,17 @@ class MainWindow(QMainWindow):
         self._folder_open_started_at: float = 0.0
         self._active_extensions = {ext for exts in FILE_TYPE_GROUPS.values() for ext in exts}
         self._supported_scan_suffixes = tuple(pattern.replace("*", "").lower() for pattern in IMAGE_FILTERS)
+        self._drive_scan_warmup_suffixes = (
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".webp",
+            ".psd",
+            ".ims",
+            ".stk",
+            ".tif",
+            ".tiff",
+        )
         self._drive_scan_enabled = bool(self.cache_manager.get_setting("drive_scan_enabled", False))
         self._drive_scans_in_flight: set[str] = set()
         self._drive_scan_workers: dict[str, DriveScanWorker] = {}
@@ -539,7 +550,7 @@ class MainWindow(QMainWindow):
             self.cache_manager,
             drive_root,
             self._thumbnail_size,
-            self._supported_scan_suffixes,
+            self._drive_scan_warmup_suffixes,
         )
         self._drive_scan_workers[drive_root] = worker
         worker.signals.progress.connect(self._on_drive_scan_progress)

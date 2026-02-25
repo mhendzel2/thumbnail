@@ -47,6 +47,7 @@ start.bat
 - IMS files use an HDF5 low-resolution path when available (`h5py`) with BioIO fallback.
 - Volocity `.mvd2` and Volocity Library Clipping `.acff` use BioIO + Bio-Formats plugin support.
 - Folder load state is persisted in the cache database under `~/.microscopy_cache`.
+- Drive scan cache warmup currently pre-caches stable formats (`jpg/jpeg/png/webp/psd/ims/stk/tif/tiff`) for startup safety.
 
 ## Troubleshooting
 

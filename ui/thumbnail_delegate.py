@@ -62,22 +62,20 @@ class ThumbnailDelegate(QStyledItemDelegate):
         else:
             painter.setPen(QPen(QColor(90, 90, 90, 180), 1))
 
-        if is_dir:
-            painter.setBrush(QColor(56, 54, 42, 220))
-        else:
-            painter.setBrush(QColor(44, 48, 56, 220))
-
         thumb_rect = QRectF(
             rect.left(),
             rect.top(),
             self._thumb_size.width(),
             self._thumb_size.height(),
         )
-        painter.drawRoundedRect(thumb_rect, 10, 10)
 
         file_path = self._file_path_for_index(index)
 
         if is_dir:
+            if option.state & QStyle.StateFlag.State_Selected:
+                painter.setBrush(QColor(56, 54, 42, 140))
+                painter.drawRoundedRect(thumb_rect, 10, 10)
+
             folder_icon = index.data(Qt.ItemDataRole.DecorationRole)
             if folder_icon is None and option.widget is not None:
                 style = option.widget.style()
@@ -91,6 +89,9 @@ class ThumbnailDelegate(QStyledItemDelegate):
                 y = target.y() + (target.height() - icon_pixmap.height()) // 2
                 painter.drawPixmap(x, y, icon_pixmap)
         else:
+            painter.setBrush(QColor(44, 48, 56, 220))
+            painter.drawRoundedRect(thumb_rect, 10, 10)
+
             pixmap = self._thumbnail_provider(file_path) if self._thumbnail_provider and file_path else None
             if pixmap is not None and not pixmap.isNull():
                 target = thumb_rect.adjusted(2, 2, -2, -2).toRect()
