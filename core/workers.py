@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import os
+import time
 from typing import Any
 
 from PyQt6.QtCore import QObject, QRunnable, pyqtSignal
@@ -14,6 +16,12 @@ class WorkerSignals(QObject):
 
 
 class MetadataSignals(QObject):
+    finished = pyqtSignal(str, dict)
+    error = pyqtSignal(str, str)
+
+
+class DriveScanSignals(QObject):
+    progress = pyqtSignal(str)
     finished = pyqtSignal(str, dict)
     error = pyqtSignal(str, str)
 
@@ -70,3 +78,71 @@ class MetadataWorker(QRunnable):
             self.signals.finished.emit(self.file_path, metadata)
         except Exception as exc:
             self.signals.error.emit(self.file_path, str(exc))
+
+
+class DriveScanWorker(QRunnable):
+    def __init__(
+        self,
+        engine: ImageEngine,
+        cache_manager,
+        drive_root: str,
+        thumbnail_size: int,
+        supported_suffixes: tuple[str, ...],
+    ) -> None:
+        super().__init__()
+        self.engine = engine
+        self.cache_manager = cache_manager
+        self.drive_root = drive_root
+        self.thumbnail_size = thumbnail_size
+        self.supported_suffixes = tuple(s.lower() for s in supported_suffixes)
+        self.signals = DriveScanSignals()
+
+    def run(self) -> None:
+        started = time.perf_counter()
+        scanned = 0
+        generated = 0
+        skipped_cached = 0
+
+        try:
+            for dir_path, _dir_names, file_names in os.walk(self.drive_root):
+                for file_name in file_names:
+                    lower = file_name.lower()
+                    if not any(lower.endswith(suffix) for suffix in self.supported_suffixes):
+                        continue
+
+                    scanned += 1
+                    file_path = os.path.join(dir_path, file_name)
+                    cache_key = f"thumb::{self.thumbnail_size}::{file_path}"
+
+                    try:
+                        if self.cache_manager.get(cache_key) is not None:
+                            skipped_cached += 1
+                            continue
+
+                        result: ThumbnailResult = self.engine.load_thumbnail(
+                            file_path,
+                            self.thumbnail_size,
+                            include_metadata=False,
+                        )
+                        self.cache_manager.set(cache_key, result.pixmap)
+                        generated += 1
+                    except Exception:
+                        continue
+
+                    if scanned % 50 == 0:
+                        self.signals.progress.emit(
+                            f"Drive scan {self.drive_root}: scanned {scanned} files, cached {generated}"
+                        )
+
+            elapsed_s = round(time.perf_counter() - started, 1)
+            self.signals.finished.emit(
+                self.drive_root,
+                {
+                    "scanned": scanned,
+                    "generated": generated,
+                    "skipped_cached": skipped_cached,
+                    "elapsed_s": elapsed_s,
+                },
+            )
+        except Exception as exc:
+            self.signals.error.emit(self.drive_root, str(exc))

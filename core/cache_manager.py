@@ -127,6 +127,21 @@ class CacheManager:
             return value
         return None
 
+    def set_setting(self, name: str, value: Any) -> None:
+        self.disk.set(self._setting_key(name), value)
+
+    def get_setting(self, name: str, default: Any = None) -> Any:
+        return self.disk.get(self._setting_key(name), default=default)
+
+    def set_drive_scan_record(self, drive_root: str, payload: dict[str, Any]) -> None:
+        self.disk.set(self._drive_scan_key(drive_root), payload)
+
+    def get_drive_scan_record(self, drive_root: str) -> dict[str, Any] | None:
+        value = self.disk.get(self._drive_scan_key(drive_root), default=None)
+        if isinstance(value, dict):
+            return value
+        return None
+
     def _serialize_disk_value(self, value: Any) -> Any:
         if isinstance(value, QPixmap):
             byte_array = QByteArray()
@@ -150,3 +165,9 @@ class CacheManager:
 
     def _folder_key(self, folder_path: str) -> str:
         return f"folder::meta::{folder_path}"
+
+    def _setting_key(self, name: str) -> str:
+        return f"setting::{name}"
+
+    def _drive_scan_key(self, drive_root: str) -> str:
+        return f"drive::scan::{drive_root}"

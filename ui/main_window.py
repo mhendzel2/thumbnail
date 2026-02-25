@@ -28,7 +28,7 @@ from PyQt6.QtWidgets import (
 
 from core.cache_manager import CacheManager
 from core.image_engine import ImageEngine
-from core.workers import MetadataWorker, ThumbnailJob, ThumbnailWorker
+from core.workers import DriveScanWorker, MetadataWorker, ThumbnailJob, ThumbnailWorker
 from ui.thumbnail_delegate import ThumbnailDelegate
 
 
@@ -81,6 +81,7 @@ class ThumbnailListView(QListView):
     quickLookRequested = pyqtSignal(str)
     scrubRequested = pyqtSignal(str, float)
     contextMenuRequested = pyqtSignal(str, QPoint)
+    navigateUpRequested = pyqtSignal()
 
     @staticmethod
     def _model_file_path(model, index: QModelIndex) -> str:
@@ -106,6 +107,11 @@ class ThumbnailListView(QListView):
 
     def keyPressEvent(self, e) -> None:
         if e is None:
+            return
+
+        if e.key() == Qt.Key.Key_Backspace:
+            self.navigateUpRequested.emit()
+            e.accept()
             return
 
         if e.key() == Qt.Key.Key_Space:
@@ -216,6 +222,9 @@ class MainWindow(QMainWindow):
         self._initial_prefetch_count = 48
         self._folder_open_started_at: float = 0.0
         self._active_extensions = {ext for exts in FILE_TYPE_GROUPS.values() for ext in exts}
+        self._supported_scan_suffixes = tuple(pattern.replace("*", "").lower() for pattern in IMAGE_FILTERS)
+        self._drive_scan_enabled = bool(self.cache_manager.get_setting("drive_scan_enabled", False))
+        self._drive_scans_in_flight: set[str] = set()
 
         self._in_flight: set[str] = set()
         self._metadata_in_flight: set[str] = set()
@@ -223,15 +232,20 @@ class MainWindow(QMainWindow):
         self._last_scrub: dict[str, tuple[str, int]] = {}
         self._quicklook_dialog = QuickLookDialog(self)
 
-        self.model = QFileSystemModel(self)
-        self.model.setIconProvider(QFileIconProvider())
-        self.model.setRootPath("")
-        self.model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Files)
-        self.model.setNameFilters(IMAGE_FILTERS)
-        self.model.setNameFilterDisables(False)
+        self.tree_model = QFileSystemModel(self)
+        self.tree_model.setIconProvider(QFileIconProvider())
+        self.tree_model.setRootPath("")
+        self.tree_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Drives)
+
+        self.list_model = QFileSystemModel(self)
+        self.list_model.setIconProvider(QFileIconProvider())
+        self.list_model.setRootPath("")
+        self.list_model.setFilter(QDir.Filter.AllDirs | QDir.Filter.NoDotAndDotDot | QDir.Filter.Files)
+        self.list_model.setNameFilters(IMAGE_FILTERS)
+        self.list_model.setNameFilterDisables(False)
 
         self.list_proxy = ThumbnailFilterProxyModel(self)
-        self.list_proxy.setSourceModel(self.model)
+        self.list_proxy.setSourceModel(self.list_model)
         self.list_proxy.set_enabled_extensions(self._active_extensions)
         self.list_proxy.set_toggle_extensions({ext for exts in FILE_TYPE_GROUPS.values() for ext in exts})
 
@@ -254,7 +268,10 @@ class MainWindow(QMainWindow):
 
         self._status_bar = QStatusBar(self)
         self.setStatusBar(self._status_bar)
-        self._status_bar.showMessage(f"Ready — folder cache database: {self.cache_manager.cache_db_path()}")
+        drive_scan_state = "ON" if self._drive_scan_enabled else "OFF"
+        self._status_bar.showMessage(
+            f"Ready — folder cache database: {self.cache_manager.cache_db_path()} — Drive scan cache: {drive_scan_state}"
+        )
 
         self._setup_metadata_dock()
 
@@ -268,14 +285,17 @@ class MainWindow(QMainWindow):
         list_selection = self.list_view.selectionModel()
         if list_selection is not None:
             list_selection.currentChanged.connect(self._on_list_current_changed)
+        self.list_view.doubleClicked.connect(self._on_list_item_activated)
+        self.list_view.activated.connect(self._on_list_item_activated)
 
         self.list_view.viewportChanged.connect(self._queue_visible_thumbnails)
         self.list_view.quickLookRequested.connect(self._open_quicklook)
         self.list_view.scrubRequested.connect(self._on_scrub_request)
         self.list_view.contextMenuRequested.connect(self._show_context_menu)
+        self.list_view.navigateUpRequested.connect(self._navigate_up_one_folder)
         self.list_view.setMouseTracking(True)
 
-        self.model.directoryLoaded.connect(self._on_directory_loaded)
+        self.list_model.directoryLoaded.connect(self._on_directory_loaded)
 
         self._prime_folder_thumbnails()
         self._queue_visible_thumbnails()
@@ -291,12 +311,14 @@ class MainWindow(QMainWindow):
 
     def _build_tree_view(self) -> QTreeView:
         tree = QTreeView(self)
-        tree.setModel(self.model)
+        tree.setModel(self.tree_model)
         tree.setUniformRowHeights(True)
         tree.setSortingEnabled(True)
         tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
         tree.setAnimated(False)
         tree.setIndentation(16)
+        tree.setRootIsDecorated(True)
+        tree.setItemsExpandable(True)
         tree.setColumnWidth(0, 280)
         tree.hideColumn(1)
         tree.hideColumn(2)
@@ -350,6 +372,11 @@ class MainWindow(QMainWindow):
             controls_layout.addWidget(checkbox)
             self.type_checkboxes[label] = checkbox
 
+        self.drive_scan_checkbox = QCheckBox("Enable Drive Scan Cache", controls)
+        self.drive_scan_checkbox.setChecked(self._drive_scan_enabled)
+        self.drive_scan_checkbox.toggled.connect(self._on_drive_scan_toggled)
+        controls_layout.addWidget(self.drive_scan_checkbox)
+
         layout.addWidget(controls)
         layout.addWidget(self.list_view, 1)
         return panel
@@ -387,25 +414,134 @@ class MainWindow(QMainWindow):
         if not current.isValid():
             return
 
-        path = self.model.filePath(current)
+        path = self.tree_model.filePath(current)
         if not Path(path).is_dir():
             return
 
+        self._open_folder_in_list(path)
+
+    def _open_folder_in_list(self, path: str) -> None:
+        folder_path = str(Path(path))
+        if not Path(folder_path).is_dir():
+            return
+
         self._folder_open_started_at = time.perf_counter()
-        previous_record = self.cache_manager.get_folder_record(path)
+        previous_record = self.cache_manager.get_folder_record(folder_path)
         if previous_record:
             prev_count = previous_record.get("item_count", "?")
             prev_time = previous_record.get("last_loaded", "")
-            self._status_bar.showMessage(f"Opening folder: {path} (seen before, last items: {prev_count}, at {prev_time})")
+            self._status_bar.showMessage(
+                f"Opening folder: {folder_path} (seen before, last items: {prev_count}, at {prev_time})"
+            )
         else:
-            self._status_bar.showMessage(f"Opening folder: {path} (first load)")
+            self._status_bar.showMessage(f"Opening folder: {folder_path} (first load)")
 
-        source_root = self.model.index(path)
+        source_root = self.list_model.index(folder_path)
         proxy_root = self.list_proxy.mapFromSource(source_root)
         self.list_view.setRootIndex(proxy_root)
 
+        self._maybe_start_drive_scan(folder_path)
         self._prime_folder_thumbnails()
         self._queue_visible_thumbnails()
+
+    def _on_list_item_activated(self, index: QModelIndex) -> None:
+        file_path = self._file_path_from_list_index(index)
+        if not file_path:
+            return
+
+        if not Path(file_path).is_dir():
+            return
+
+        tree_index = self.tree_model.index(file_path)
+        if tree_index.isValid():
+            self.tree_view.setCurrentIndex(tree_index)
+            self.tree_view.expand(tree_index)
+            self.tree_view.scrollTo(tree_index)
+
+        self._open_folder_in_list(file_path)
+
+    def _navigate_up_one_folder(self) -> None:
+        current_root = self._current_list_root_path()
+        if not current_root:
+            return
+
+        current_path = Path(current_root)
+        parent = current_path.parent
+        if parent == current_path or not parent.exists():
+            return
+
+        parent_str = str(parent)
+        tree_index = self.tree_model.index(parent_str)
+        if tree_index.isValid():
+            self.tree_view.setCurrentIndex(tree_index)
+            self.tree_view.expand(tree_index)
+            self.tree_view.scrollTo(tree_index)
+
+        self._open_folder_in_list(parent_str)
+
+    def _on_drive_scan_toggled(self, enabled: bool) -> None:
+        self._drive_scan_enabled = bool(enabled)
+        self.cache_manager.set_setting("drive_scan_enabled", self._drive_scan_enabled)
+        if self._drive_scan_enabled:
+            current_root = self._current_list_root_path()
+            if current_root:
+                self._maybe_start_drive_scan(current_root)
+
+        state = "enabled" if self._drive_scan_enabled else "disabled"
+        self._status_bar.showMessage(f"Drive scan cache {state}")
+
+    def _drive_root_for_path(self, path: str) -> str:
+        resolved = Path(path).resolve()
+        anchor = resolved.anchor
+        return str(Path(anchor)) if anchor else str(resolved)
+
+    def _maybe_start_drive_scan(self, path: str) -> None:
+        if not self._drive_scan_enabled:
+            return
+
+        drive_root = self._drive_root_for_path(path)
+        if drive_root in self._drive_scans_in_flight:
+            return
+
+        previous_scan = self.cache_manager.get_drive_scan_record(drive_root)
+        if previous_scan:
+            self._status_bar.showMessage(
+                f"Drive scan already cached for {drive_root} ({previous_scan.get('generated', 0)} thumbnails generated)"
+            )
+            return
+
+        self._drive_scans_in_flight.add(drive_root)
+        worker = DriveScanWorker(
+            self.image_engine,
+            self.cache_manager,
+            drive_root,
+            self._thumbnail_size,
+            self._supported_scan_suffixes,
+        )
+        worker.signals.progress.connect(self._on_drive_scan_progress)
+        worker.signals.finished.connect(self._on_drive_scan_finished)
+        worker.signals.error.connect(self._on_drive_scan_error)
+        self.thread_pool.start(worker)
+        self._status_bar.showMessage(f"Drive scan started for {drive_root}")
+
+    def _on_drive_scan_progress(self, message: str) -> None:
+        self._status_bar.showMessage(message)
+
+    def _on_drive_scan_finished(self, drive_root: str, payload: dict) -> None:
+        self._drive_scans_in_flight.discard(drive_root)
+        record = {
+            **payload,
+            "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        self.cache_manager.set_drive_scan_record(drive_root, record)
+        self._status_bar.showMessage(
+            f"Drive scan complete for {drive_root}: {payload.get('scanned', 0)} scanned, "
+            f"{payload.get('generated', 0)} new thumbnails in {payload.get('elapsed_s', 0)}s"
+        )
+
+    def _on_drive_scan_error(self, drive_root: str, error_message: str) -> None:
+        self._drive_scans_in_flight.discard(drive_root)
+        self._status_bar.showMessage(f"Drive scan failed for {drive_root}: {error_message}")
 
     def _on_list_current_changed(self, current: QModelIndex, previous: QModelIndex) -> None:
         if not current.isValid():
@@ -560,7 +696,7 @@ class MainWindow(QMainWindow):
 
         self._file_metadata[file_path] = {**self._file_metadata.get(file_path, {}), **metadata}
 
-        source_index = self.model.index(file_path)
+        source_index = self.list_model.index(file_path)
         proxy_index = self.list_proxy.mapFromSource(source_index)
         if proxy_index.isValid():
             rect = self.list_view.visualRect(proxy_index)
@@ -582,7 +718,7 @@ class MainWindow(QMainWindow):
         if current.isValid() and self._file_path_from_list_index(current) == file_path:
             self._render_metadata(file_path, self._file_metadata[file_path])
 
-        source_index = self.model.index(file_path)
+        source_index = self.list_model.index(file_path)
         proxy_index = self.list_proxy.mapFromSource(source_index)
         if proxy_index.isValid():
             rect = self.list_view.visualRect(proxy_index)
@@ -710,7 +846,7 @@ class MainWindow(QMainWindow):
         source_index = self.list_proxy.mapToSource(index)
         if not source_index.isValid():
             return ""
-        return self.model.filePath(source_index)
+        return self.list_model.filePath(source_index)
 
     def _current_list_root_path(self) -> str:
         root = self.list_view.rootIndex()
@@ -719,7 +855,7 @@ class MainWindow(QMainWindow):
         source_root = self.list_proxy.mapToSource(root)
         if not source_root.isValid():
             return ""
-        return self.model.filePath(source_root)
+        return self.list_model.filePath(source_root)
 
     def closeEvent(self, a0) -> None:
         self.thread_pool.waitForDone(1500)
