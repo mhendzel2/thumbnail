@@ -24,6 +24,7 @@ except Exception:
     tifffile = None
 
 h5py = None
+hdf5plugin = None
 
 LOGGER = logging.getLogger(__name__)
 
@@ -47,12 +48,17 @@ class ImageEngine:
         }
 
     def _get_h5py(self):
-        global h5py
+        global h5py, hdf5plugin
         if h5py is None:
             try:
                 h5py = importlib.import_module("h5py")
             except Exception:
                 return None
+        if hdf5plugin is None:
+            try:
+                hdf5plugin = importlib.import_module("hdf5plugin")
+            except Exception:
+                pass
         return h5py
 
     def load_thumbnail(
@@ -70,6 +76,12 @@ class ImageEngine:
             return self._load_standard_thumbnail(path, size)
 
         if self._is_ims_path(path):
+            # For initial thumbnails (no slice), try the fast embedded preview first
+            if not slice_request:
+                embedded = self._load_ims_embedded_thumbnail(path, size)
+                if embedded is not None:
+                    return embedded
+
             ims_result = self._load_ims_thumbnail(path, size, slice_request=slice_request)
             if ims_result is not None:
                 return ims_result
@@ -163,7 +175,7 @@ class ImageEngine:
                         fallback["bioio_error"] = str(exc)
                         return fallback
 
-                LOGGER.warning("Failed to read metadata for %s: %s", file_path, exc)
+                LOGGER.debug("Failed to read metadata for %s: %s", file_path, exc)
                 return {"broken": True, "error": str(exc)}
 
         return {"broken": True, "error": "Unsupported file format"}
@@ -198,7 +210,7 @@ class ImageEngine:
                 pixmap = self._pil_to_fitted_qpixmap(image, size)
                 return ThumbnailResult(pixmap=pixmap, metadata={"source": "resized", "t_count": 1, "z_count": 1, "c_count": len(image.getbands())})
         except Exception as exc:
-            LOGGER.exception("Failed to read standard image %s", path)
+            LOGGER.debug("Failed to read standard image %s: %s", path, exc)
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": str(exc)},
@@ -234,7 +246,7 @@ class ImageEngine:
                     fallback.metadata["bioio_error"] = str(exc)
                     return fallback
 
-            LOGGER.warning("Failed microscopy decode for %s: %s", path, exc)
+            LOGGER.debug("Failed microscopy decode for %s: %s", path, exc)
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": str(exc)},
@@ -305,6 +317,64 @@ class ImageEngine:
             return ThumbnailResult(pixmap=pixmap, metadata=metadata)
         except Exception as exc:
             LOGGER.debug("TIFF fallback failed for %s: %s", path, exc)
+            return None
+
+    def _load_ims_embedded_thumbnail(
+        self,
+        path: Path,
+        size: int,
+    ) -> ThumbnailResult | None:
+        """Read the embedded Thumbnail/Data from an IMS file (RGBA, uncompressed)."""
+        h5py_mod = self._get_h5py()
+        if h5py_mod is None:
+            return None
+
+        try:
+            with h5py_mod.File(str(path), "r") as ims_file:
+                thumb_group = ims_file.get("Thumbnail")
+                if thumb_group is None:
+                    return None
+                data_ds = thumb_group.get("Data")
+                if data_ds is None or not hasattr(data_ds, "shape"):
+                    return None
+
+                raw = data_ds[...]
+                arr = np.asarray(raw, dtype=np.uint8)
+
+                total = int(np.prod(arr.shape))
+                if total < 4:
+                    return None
+
+                # Imaris stores thumbnail as (H, W*4) RGBA
+                if arr.ndim == 2:
+                    h = arr.shape[0]
+                    w_times_4 = arr.shape[1]
+                    if w_times_4 % 4 == 0:
+                        w = w_times_4 // 4
+                        arr = arr.reshape(h, w, 4)
+                    else:
+                        return None
+                elif arr.ndim == 3 and arr.shape[2] in (3, 4):
+                    pass  # already (H, W, C)
+                else:
+                    return None
+
+                pil_img = Image.fromarray(arr, "RGBA" if arr.shape[2] == 4 else "RGB")
+                pil_img.thumbnail((size, size), Image.Resampling.LANCZOS)
+                pixmap = self._pil_to_fitted_qpixmap(pil_img, size)
+
+                metadata = self._load_ims_metadata(path) or {
+                    "shape_tczyx": (1, 1, 1, arr.shape[0], arr.shape[1]),
+                    "t_count": 1,
+                    "c_count": 1,
+                    "z_count": 1,
+                    "dtype": "uint8",
+                    "pixel_size_um": None,
+                }
+                metadata["source"] = "ims-embedded-thumbnail"
+                return ThumbnailResult(pixmap=pixmap, metadata=metadata)
+        except Exception as exc:
+            LOGGER.debug("IMS embedded thumbnail failed for %s: %s", path, exc)
             return None
 
     def _load_ims_thumbnail(

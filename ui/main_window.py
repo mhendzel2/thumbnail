@@ -18,7 +18,10 @@ from PyQt6.QtWidgets import (
     QListView,
     QMainWindow,
     QMenu,
+    QMessageBox,
     QPlainTextEdit,
+    QProgressBar,
+    QPushButton,
     QSplitter,
     QStatusBar,
     QTreeView,
@@ -28,7 +31,7 @@ from PyQt6.QtWidgets import (
 
 from core.cache_manager import CacheManager
 from core.image_engine import ImageEngine
-from core.workers import DriveScanWorker, MetadataWorker, ThumbnailJob, ThumbnailWorker
+from core.workers import DriveScanWorker, FullIndexWorker, MetadataWorker, ThumbnailJob, ThumbnailWorker
 from ui.thumbnail_delegate import ThumbnailDelegate
 
 
@@ -181,6 +184,96 @@ class ThumbnailListView(QListView):
         self.contextMenuRequested.emit(file_path, a0.globalPos())
 
 
+class IndexProgressDialog(QDialog):
+    """Non-modal dialog showing full-index progress with cancel capability."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Building Thumbnail Index")
+        self.setMinimumWidth(520)
+        self.setModal(False)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        self._heading = QLabel("Scanning all drives for microscopy images…")
+        self._heading.setStyleSheet("font-size: 13px; font-weight: bold;")
+        layout.addWidget(self._heading)
+
+        self._drive_label = QLabel("Preparing…")
+        layout.addWidget(self._drive_label)
+
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 0)  # indeterminate
+        layout.addWidget(self._progress_bar)
+
+        self._stats_label = QLabel("Scanned: 0  |  Cached: 0  |  Skipped: 0")
+        layout.addWidget(self._stats_label)
+
+        btn_row = QHBoxLayout()
+        btn_row.addStretch(1)
+        self._cancel_btn = QPushButton("Cancel")
+        self._cancel_btn.clicked.connect(self._on_cancel)
+        btn_row.addWidget(self._cancel_btn)
+        layout.addLayout(btn_row)
+
+        self._cancelled = False
+        self._worker: FullIndexWorker | None = None
+
+    def set_worker(self, worker: FullIndexWorker) -> None:
+        self._worker = worker
+
+    def update_progress(self, drive_root: str, scanned: int, generated: int, skipped: int) -> None:
+        self._drive_label.setText(f"Scanning: {drive_root}")
+        self._stats_label.setText(
+            f"Scanned: {scanned:,}  |  Cached: {generated:,}  |  Already cached: {skipped:,}"
+        )
+
+    def on_drive_finished(self, drive_root: str, stats: dict) -> None:
+        reused = stats.get("reused", False)
+        if reused:
+            self._drive_label.setText(f"Skipped {drive_root} (already indexed)")
+        else:
+            gen = stats.get("generated", 0)
+            sc = stats.get("scanned", 0)
+            self._drive_label.setText(f"Finished {drive_root}: {sc:,} files, {gen:,} thumbnails")
+
+    def on_all_finished(self, stats: dict) -> None:
+        self._progress_bar.setRange(0, 1)
+        self._progress_bar.setValue(1)
+        total_gen = stats.get("total_generated", 0)
+        total_sc = stats.get("total_scanned", 0)
+        elapsed = stats.get("elapsed_s", 0)
+        stopped = stats.get("stopped", False)
+
+        if stopped:
+            self._heading.setText("Indexing cancelled")
+            self._drive_label.setText(
+                f"Partial index: {total_sc:,} files scanned, {total_gen:,} cached in {elapsed}s"
+            )
+        else:
+            self._heading.setText("Indexing complete!")
+            self._drive_label.setText(
+                f"Indexed {total_sc:,} files, cached {total_gen:,} thumbnails in {elapsed}s"
+            )
+
+        self._cancel_btn.setText("Close")
+        self._cancel_btn.clicked.disconnect()
+        self._cancel_btn.clicked.connect(self.accept)
+
+    def _on_cancel(self) -> None:
+        self._cancelled = True
+        if self._worker is not None:
+            self._worker.request_stop()
+        self._heading.setText("Cancelling… (waiting for current file)")
+        self._cancel_btn.setEnabled(False)
+
+    def closeEvent(self, a0) -> None:
+        if not self._cancelled and self._worker is not None:
+            self._on_cancel()
+        super().closeEvent(a0)
+
+
 class ThumbnailFilterProxyModel(QSortFilterProxyModel):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
@@ -256,6 +349,8 @@ class MainWindow(QMainWindow):
         self._drive_scan_enabled = bool(self.cache_manager.get_setting("drive_scan_enabled", False))
         self._drive_scans_in_flight: set[str] = set()
         self._drive_scan_workers: dict[str, DriveScanWorker] = {}
+        self._full_index_worker: FullIndexWorker | None = None
+        self._index_dialog: IndexProgressDialog | None = None
 
         self._in_flight: set[str] = set()
         self._metadata_in_flight: set[str] = set()
@@ -334,6 +429,27 @@ class MainWindow(QMainWindow):
         self._prime_folder_thumbnails()
         self._queue_visible_thumbnails()
 
+        # Offer full index on first run
+        QTimer.singleShot(600, self._maybe_prompt_full_index)
+
+    def _maybe_prompt_full_index(self) -> None:
+        """If no full index has ever completed, offer to build one."""
+        if self.cache_manager.get_setting("full_index_completed"):
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Build Thumbnail Index",
+            "No thumbnail index found.\n\n"
+            "Would you like to scan all drives now and pre-cache thumbnails?\n"
+            "This makes future browsing much faster.\n\n"
+            'You can also do this later with the "Build Index" button.',
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if reply == QMessageBox.StandardButton.Yes:
+            self._start_full_index()
+
     def _setup_metadata_dock(self) -> None:
         self.metadata_text = QPlainTextEdit(self)
         self.metadata_text.setReadOnly(True)
@@ -410,6 +526,11 @@ class MainWindow(QMainWindow):
         self.drive_scan_checkbox.setChecked(self._drive_scan_enabled)
         self.drive_scan_checkbox.toggled.connect(self._on_drive_scan_toggled)
         controls_layout.addWidget(self.drive_scan_checkbox)
+
+        self.build_index_btn = QPushButton("Build Index", controls)
+        self.build_index_btn.setToolTip("Scan all drives and pre-cache thumbnails for fast browsing")
+        self.build_index_btn.clicked.connect(self._start_full_index)
+        controls_layout.addWidget(self.build_index_btn)
 
         layout.addWidget(controls)
         layout.addWidget(self.list_view, 1)
@@ -955,13 +1076,98 @@ class MainWindow(QMainWindow):
         return self.list_model.filePath(source_root)
 
     def closeEvent(self, a0) -> None:
+        if self._full_index_worker is not None:
+            try:
+                self._full_index_worker.request_stop()
+            except Exception:
+                pass
+
         for worker in list(self._drive_scan_workers.values()):
             try:
                 worker.request_stop()
             except Exception:
                 pass
 
-        self.thread_pool.waitForDone(1500)
+        self.thread_pool.waitForDone(3000)
         self._drive_scan_workers.clear()
+        self._full_index_worker = None
         self.cache_manager.close()
         super().closeEvent(a0)
+
+    # ------------------------------------------------------------------
+    # Full-index support
+    # ------------------------------------------------------------------
+
+    def _start_full_index(self) -> None:
+        """Launch a full index across all drives."""
+        if self._full_index_worker is not None:
+            # Already running — show the existing dialog
+            if self._index_dialog is not None:
+                self._index_dialog.raise_()
+                self._index_dialog.activateWindow()
+            return
+
+        # Collect extra roots from the tree model (network shares etc.)
+        extra_roots: list[str] = []
+        root = self.tree_model.index(0, 0)
+        for row in range(self.tree_model.rowCount(QModelIndex())):
+            idx = self.tree_model.index(row, 0)
+            if idx.isValid():
+                path = self.tree_model.filePath(idx)
+                if path and not Path(path).anchor:
+                    extra_roots.append(path)
+                elif path and path.startswith("\\\\"):
+                    extra_roots.append(path)
+
+        worker = FullIndexWorker(
+            engine=self.image_engine,
+            cache_manager=self.cache_manager,
+            thumbnail_size=self._thumbnail_size,
+            supported_suffixes=self._drive_scan_warmup_suffixes,
+            extra_roots=extra_roots,
+        )
+        self._full_index_worker = worker
+
+        dialog = IndexProgressDialog(self)
+        dialog.set_worker(worker)
+        self._index_dialog = dialog
+
+        worker.signals.progress.connect(dialog.update_progress)
+        worker.signals.drive_finished.connect(dialog.on_drive_finished)
+        worker.signals.all_finished.connect(self._on_full_index_finished)
+        worker.signals.all_finished.connect(dialog.on_all_finished)
+        worker.signals.error.connect(self._on_full_index_error)
+
+        self.build_index_btn.setEnabled(False)
+        self.build_index_btn.setText("Indexing…")
+        dialog.show()
+        self.thread_pool.start(worker)
+
+    def _on_full_index_finished(self, stats: dict) -> None:
+        self._full_index_worker = None
+        self.build_index_btn.setEnabled(True)
+        self.build_index_btn.setText("Build Index")
+
+        stopped = stats.get("stopped", False)
+        total_gen = stats.get("total_generated", 0)
+        total_sc = stats.get("total_scanned", 0)
+        elapsed = stats.get("elapsed_s", 0)
+
+        if not stopped:
+            self.cache_manager.set_setting("full_index_completed", {
+                "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "total_scanned": total_sc,
+                "total_generated": total_gen,
+                "elapsed_s": elapsed,
+            })
+
+        self._status_bar.showMessage(
+            f"Index {'cancelled' if stopped else 'complete'}: "
+            f"{total_sc:,} files scanned, {total_gen:,} thumbnails cached in {elapsed}s"
+        )
+
+        # Refresh visible thumbnails in case new cache entries appeared
+        self._queue_visible_thumbnails()
+
+    def _on_full_index_error(self, drive_root: str, error_message: str) -> None:
+        self._status_bar.showMessage(f"Index error on {drive_root}: {error_message}")

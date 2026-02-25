@@ -6,6 +6,7 @@ bioio-czi
 bioio-nd2
 bioio-ome-tiff
 h5py
+hdf5plugin
 numpy
 Pillow
 diskcache

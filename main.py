@@ -28,9 +28,12 @@ def main() -> int:
     )
     warnings.filterwarnings(
         "ignore",
-        message=r".*invalid offset to first page.*",
         category=UserWarning,
         module=r"tifffile",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*invalid offset.*",
     )
 
     app = QApplication(sys.argv)

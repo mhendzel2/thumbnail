@@ -22,6 +22,7 @@ def build() -> None:
             "--hidden-import=bioio_czi",
             "--hidden-import=bioio_nd2",
             "--hidden-import=bioio_ome_tiff",
+            "--hidden-import=hdf5plugin",
         ]
     )
 
