@@ -691,7 +691,10 @@ class MainWindow(QMainWindow):
         slice_request: dict | None = None,
         extra: dict | None = None,
     ) -> None:
-        if Path(file_path).is_dir():
+        try:
+            if Path(file_path).is_dir():
+                return
+        except Exception:
             return
 
         request_size = size if size is not None else self._thumbnail_size

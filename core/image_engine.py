@@ -36,6 +36,10 @@ class ImageEngine:
     def __init__(self) -> None:
         self._max_tiff_plane_pixels = 40_000_000
         self._max_ims_plane_pixels = 24_000_000
+        self._explicit_bioio_readers = {
+            ".czi": "bioio_czi",
+            ".nd2": "bioio_nd2",
+        }
 
     def _get_h5py(self):
         global h5py
@@ -64,8 +68,6 @@ class ImageEngine:
             ims_result = self._load_ims_thumbnail(path, size, slice_request=slice_request)
             if ims_result is not None:
                 return ims_result
-            if self._is_microscopy_path(path):
-                return self._load_microscopy_thumbnail(path, size, slice_request=slice_request)
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": "IMS decode unavailable", "source": "ims-hdf5"},
@@ -113,14 +115,6 @@ class ImageEngine:
             if ims_meta is not None:
                 ims_meta["source"] = "ims-hdf5"
                 return ims_meta
-            if self._is_microscopy_path(path):
-                try:
-                    bio_image = self._open_bioimage(path)
-                    metadata = self._collect_bio_metadata(bio_image)
-                    metadata["source"] = "bioio"
-                    return metadata
-                except Exception:
-                    pass
             return {"broken": True, "error": "IMS metadata unavailable", "source": "ims-hdf5"}
 
         if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
@@ -692,7 +686,25 @@ class ImageEngine:
     def _open_bioimage(self, path: Path):
         module = importlib.import_module("bioio")
         bio_image_class = getattr(module, "BioImage")
-        return bio_image_class(str(path))
+
+        name = path.name.lower()
+        suffix = path.suffix.lower()
+
+        if name.endswith(".ome.tif") or name.endswith(".ome.tiff"):
+            reader_module = importlib.import_module("bioio_ome_tiff")
+            reader_class = getattr(reader_module, "Reader")
+            return bio_image_class(str(path), reader=reader_class)
+
+        if suffix in self._explicit_bioio_readers:
+            reader_module_name = self._explicit_bioio_readers[suffix]
+            reader_module = importlib.import_module(reader_module_name)
+            reader_class = getattr(reader_module, "Reader")
+            return bio_image_class(str(path), reader=reader_class)
+
+        if suffix in {".mvd2", ".acff"}:
+            raise RuntimeError("Volocity backend is currently disabled for startup stability")
+
+        raise RuntimeError(f"No explicit BioIO reader configured for extension: {suffix}")
 
     def _select_lowest_resolution_if_available(self, bio_image) -> None:
         try:

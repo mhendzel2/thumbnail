@@ -1,7 +1,7 @@
 from PyQt6.QtCore import QRectF, QSize, Qt
 from PyQt6.QtGui import QColor, QFontMetrics, QPainter, QPen, QFileSystemModel
 from PyQt6.QtCore import QSortFilterProxyModel
-from PyQt6.QtWidgets import QStyle, QStyleOptionViewItem, QStyledItemDelegate
+from PyQt6.QtWidgets import QApplication, QStyle, QStyleOptionViewItem, QStyledItemDelegate
 
 
 class ThumbnailDelegate(QStyledItemDelegate):
@@ -70,24 +70,46 @@ class ThumbnailDelegate(QStyledItemDelegate):
         )
 
         file_path = self._file_path_for_index(index)
+        text_rect = QRectF(
+            rect.left(),
+            thumb_rect.bottom() + 8,
+            self._thumb_size.width(),
+            rect.bottom() - thumb_rect.bottom() - 8,
+        )
 
         if is_dir:
             if option.state & QStyle.StateFlag.State_Selected:
                 painter.setBrush(QColor(56, 54, 42, 140))
                 painter.drawRoundedRect(thumb_rect, 10, 10)
 
-            folder_icon = index.data(Qt.ItemDataRole.DecorationRole)
-            if folder_icon is None and option.widget is not None:
+            folder_icon = None
+            if option.widget is not None:
                 style = option.widget.style()
                 if style is not None:
                     folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
+            if folder_icon is None:
+                app = QApplication.instance()
+                if isinstance(app, QApplication):
+                    style = app.style()
+                    if style is not None:
+                        folder_icon = style.standardIcon(QStyle.StandardPixmap.SP_DirIcon)
 
             if folder_icon is not None:
-                target = thumb_rect.adjusted(18, 18, -18, -18).toRect()
-                icon_pixmap = folder_icon.pixmap(target.size())
-                x = target.x() + (target.width() - icon_pixmap.width()) // 2
-                y = target.y() + (target.height() - icon_pixmap.height()) // 2
+                icon_size = QSize(84, 84)
+                icon_pixmap = folder_icon.pixmap(icon_size)
+                icon_x = int(rect.left() + (rect.width() - icon_pixmap.width()) / 2)
+                icon_y = int(rect.top() + 22)
+                x = icon_x
+                y = icon_y
                 painter.drawPixmap(x, y, icon_pixmap)
+
+                label_top = y + icon_pixmap.height() + 8
+                text_rect = QRectF(
+                    rect.left() + 2,
+                    label_top,
+                    rect.width() - 4,
+                    max(18.0, rect.bottom() - label_top),
+                )
         else:
             painter.setBrush(QColor(44, 48, 56, 220))
             painter.drawRoundedRect(thumb_rect, 10, 10)
@@ -103,12 +125,6 @@ class ThumbnailDelegate(QStyledItemDelegate):
         self._paint_badges(painter, thumb_rect, metadata)
 
         name = index.data(Qt.ItemDataRole.DisplayRole) or ""
-        text_rect = QRectF(
-            rect.left(),
-            thumb_rect.bottom() + 8,
-            self._thumb_size.width(),
-            rect.bottom() - thumb_rect.bottom() - 8,
-        )
 
         metrics = QFontMetrics(painter.font())
         elided = metrics.elidedText(name, Qt.TextElideMode.ElideRight, int(text_rect.width()))
