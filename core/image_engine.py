@@ -4,6 +4,11 @@ import io
 import importlib
 import logging
 import re
+import subprocess
+import sys
+import json
+import base64
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -68,6 +73,16 @@ class ImageEngine:
             ims_result = self._load_ims_thumbnail(path, size, slice_request=slice_request)
             if ims_result is not None:
                 return ims_result
+
+            tiff_like = self._load_tiff_thumbnail(path, size, slice_request=slice_request)
+            if tiff_like is not None:
+                tiff_like.metadata["source"] = "ims-tiff-fallback"
+                return tiff_like
+
+            external = self._load_ims_thumbnail_subprocess(path, size, slice_request=slice_request)
+            if external is not None:
+                return external
+
             return ThumbnailResult(
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": "IMS decode unavailable", "source": "ims-hdf5"},
@@ -115,6 +130,17 @@ class ImageEngine:
             if ims_meta is not None:
                 ims_meta["source"] = "ims-hdf5"
                 return ims_meta
+
+            tiff_like_meta = self._load_tiff_metadata(path)
+            if tiff_like_meta is not None:
+                tiff_like_meta["source"] = "ims-tiff-fallback"
+                return tiff_like_meta
+
+            external_meta = self._load_ims_metadata_subprocess(path)
+            if external_meta is not None:
+                external_meta["source"] = "bioformats-subprocess"
+                return external_meta
+
             return {"broken": True, "error": "IMS metadata unavailable", "source": "ims-hdf5"}
 
         if self._is_tiff_path(path) and not self._is_ome_tiff_path(path):
@@ -435,6 +461,117 @@ class ImageEngine:
             LOGGER.debug("IMS metadata fallback failed for %s: %s", path, exc)
             return None
 
+    def _load_ims_thumbnail_subprocess(
+        self,
+        path: Path,
+        size: int,
+        *,
+        slice_request: dict[str, Any] | None = None,
+    ) -> ThumbnailResult | None:
+        mode = ""
+        index = 0
+        if slice_request:
+            mode = str(slice_request.get("mode", "") or "").lower()
+            try:
+                index = int(slice_request.get("index", 0))
+            except Exception:
+                index = 0
+
+        payload = self._run_bioformats_subprocess(path, size=size, mode=mode, index=index, metadata_only=False)
+        if not payload or not payload.get("ok"):
+            return None
+
+        png_b64 = payload.get("png_b64")
+        if not isinstance(png_b64, str) or not png_b64:
+            return None
+
+        try:
+            raw = base64.b64decode(png_b64)
+            pixmap = QPixmap()
+            if not pixmap.loadFromData(raw, "PNG"):
+                return None
+        except Exception:
+            return None
+
+        metadata = {
+            "shape_tczyx": tuple(payload.get("shape_tczyx", (1, 1, 1, 1, 1))),
+            "t_count": int(payload.get("t_count", 1) or 1),
+            "c_count": int(payload.get("c_count", 1) or 1),
+            "z_count": int(payload.get("z_count", 1) or 1),
+            "dtype": str(payload.get("dtype", "unknown")),
+            "pixel_size_um": None,
+            "source": "bioformats-subprocess",
+        }
+        return ThumbnailResult(pixmap=self._fit_to_square(pixmap, size), metadata=metadata)
+
+    def _load_ims_metadata_subprocess(self, path: Path) -> dict[str, Any] | None:
+        payload = self._run_bioformats_subprocess(path, size=128, mode="", index=0, metadata_only=True)
+        if not payload or not payload.get("ok"):
+            return None
+
+        return {
+            "shape_tczyx": tuple(payload.get("shape_tczyx", (1, 1, 1, 1, 1))),
+            "t_count": int(payload.get("t_count", 1) or 1),
+            "c_count": int(payload.get("c_count", 1) or 1),
+            "z_count": int(payload.get("z_count", 1) or 1),
+            "dtype": str(payload.get("dtype", "unknown")),
+            "pixel_size_um": None,
+        }
+
+    def _run_bioformats_subprocess(
+        self,
+        path: Path,
+        *,
+        size: int,
+        mode: str,
+        index: int,
+        metadata_only: bool,
+    ) -> dict[str, Any] | None:
+        bridge_script = Path(__file__).with_name("bioformats_bridge.py")
+        if not bridge_script.exists():
+            return None
+
+        env = os.environ.copy()
+        cjdk_cache_dir = Path.home() / ".microscopy_cache" / "cjdk_cache"
+        cjdk_cache_dir.mkdir(parents=True, exist_ok=True)
+        env.setdefault("CJDK_CACHE_DIR", str(cjdk_cache_dir))
+
+        try:
+            proc = subprocess.run(
+                [
+                    sys.executable,
+                    str(bridge_script),
+                    str(path),
+                    str(int(size)),
+                    mode,
+                    str(int(index)),
+                    "1" if metadata_only else "0",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=40,
+                env=env,
+            )
+        except Exception:
+            return None
+
+        if proc.returncode != 0 and not proc.stdout:
+            return None
+
+        raw = (proc.stdout or "").strip().splitlines()
+        if not raw:
+            return None
+
+        for line in reversed(raw):
+            try:
+                payload = json.loads(line)
+            except Exception:
+                continue
+            if isinstance(payload, dict) and "ok" in payload:
+                return payload
+
+        return None
+
     def _discover_ims_data_datasets(self, ims_file) -> list[Any]:
         discovered: list[tuple[str, Any]] = []
 
@@ -700,9 +837,6 @@ class ImageEngine:
             reader_module = importlib.import_module(reader_module_name)
             reader_class = getattr(reader_module, "Reader")
             return bio_image_class(str(path), reader=reader_class)
-
-        if suffix in {".mvd2", ".acff"}:
-            raise RuntimeError("Volocity backend is currently disabled for startup stability")
 
         raise RuntimeError(f"No explicit BioIO reader configured for extension: {suffix}")
 

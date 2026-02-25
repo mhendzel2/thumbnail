@@ -722,7 +722,11 @@ class MainWindow(QMainWindow):
 
     def _on_thumbnail_ready(self, file_path: str, pixmap, metadata: dict) -> None:
         cache_key = metadata.get("cache_key", self._cache_key(file_path))
-        self.cache_manager.set(cache_key, pixmap)
+        is_broken = bool(metadata.get("broken"))
+        if is_broken:
+            self.cache_manager.delete(cache_key)
+        else:
+            self.cache_manager.set(cache_key, pixmap)
         self._in_flight.discard(cache_key)
 
         self._file_metadata[file_path] = {**self._file_metadata.get(file_path, {}), **metadata}
