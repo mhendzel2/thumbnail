@@ -1,6 +1,7 @@
 import sys
 import logging
 import os
+import warnings
 from pathlib import Path
 
 from PyQt6.QtWidgets import QApplication
@@ -17,6 +18,20 @@ def main() -> int:
     logging.getLogger("bioio").setLevel(logging.ERROR)
     logging.getLogger("bioio_base").setLevel(logging.ERROR)
     logging.getLogger("bioio_ome_tiff").setLevel(logging.ERROR)
+    logging.getLogger("tifffile").setLevel(logging.ERROR)
+
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Corrupt EXIF data.*",
+        category=UserWarning,
+        module=r"PIL\.TiffImagePlugin",
+    )
+    warnings.filterwarnings(
+        "ignore",
+        message=r".*invalid offset to first page.*",
+        category=UserWarning,
+        module=r"tifffile",
+    )
 
     app = QApplication(sys.argv)
     if hasattr(qdarktheme, "setup_theme"):
