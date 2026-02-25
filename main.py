@@ -35,6 +35,12 @@ def main() -> int:
         "ignore",
         message=r".*invalid offset.*",
     )
+    warnings.filterwarnings(
+        "ignore",
+        message=r"Truncated File Read",
+        category=UserWarning,
+        module=r"PIL\.TiffImagePlugin",
+    )
 
     app = QApplication(sys.argv)
     if hasattr(qdarktheme, "setup_theme"):

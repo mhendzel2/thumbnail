@@ -331,8 +331,9 @@ class MainWindow(QMainWindow):
 
         self._thumbnail_size = 160
         self._quicklook_size = 900
-        self._initial_prefetch_count = 48
+        self._initial_prefetch_count = 24
         self._folder_open_started_at: float = 0.0
+        self._visible_thumb_timer: QTimer | None = None
         self._active_extensions = {ext for exts in FILE_TYPE_GROUPS.values() for ext in exts}
         self._supported_scan_suffixes = tuple(pattern.replace("*", "").lower() for pattern in IMAGE_FILTERS)
         self._drive_scan_warmup_suffixes = (
@@ -416,7 +417,7 @@ class MainWindow(QMainWindow):
         self.list_view.doubleClicked.connect(self._on_list_item_activated)
         self.list_view.activated.connect(self._on_list_item_activated)
 
-        self.list_view.viewportChanged.connect(self._queue_visible_thumbnails)
+        self.list_view.viewportChanged.connect(self._schedule_visible_thumbnails)
         self.list_view.quickLookRequested.connect(self._open_quicklook)
         self.list_view.scrubRequested.connect(self._on_scrub_request)
         self.list_view.contextMenuRequested.connect(self._show_context_menu)
@@ -427,7 +428,7 @@ class MainWindow(QMainWindow):
         self.list_model.directoryLoaded.connect(self._on_directory_loaded)
 
         self._prime_folder_thumbnails()
-        self._queue_visible_thumbnails()
+        self._schedule_visible_thumbnails()
 
         # Offer full index on first run
         QTimer.singleShot(600, self._maybe_prompt_full_index)
@@ -538,7 +539,7 @@ class MainWindow(QMainWindow):
 
     def _on_search_text_changed(self, text: str) -> None:
         self.list_proxy.set_search_text(text)
-        self._queue_visible_thumbnails()
+        self._schedule_visible_thumbnails()
 
     def _on_type_toggled(self, label: str, checked: bool) -> None:
         extensions = FILE_TYPE_GROUPS.get(label, set())
@@ -549,7 +550,7 @@ class MainWindow(QMainWindow):
                 self._active_extensions.discard(ext)
 
         self.list_proxy.set_enabled_extensions(self._active_extensions)
-        self._queue_visible_thumbnails()
+        self._schedule_visible_thumbnails()
 
     def _cache_key(self, file_path: str, size: int | None = None, slice_request: dict | None = None) -> str:
         base_size = size if size is not None else self._thumbnail_size
@@ -569,16 +570,18 @@ class MainWindow(QMainWindow):
         if not current.isValid():
             return
 
-        path = self.tree_model.filePath(current)
-        if not Path(path).is_dir():
+        # Use model info instead of filesystem stat (avoids blocking on network shares)
+        if not self.tree_model.isDir(current):
             return
 
+        path = self.tree_model.filePath(current)
         self._open_folder_in_list(path)
 
     def _open_folder_in_list(self, path: str) -> None:
         folder_path = str(Path(path))
-        if not Path(folder_path).is_dir():
-            return
+
+        # Cancel all pending thumbnail jobs from the previous folder
+        self._in_flight.clear()
 
         self._folder_open_started_at = time.perf_counter()
         previous_record = self.cache_manager.get_folder_record(folder_path)
@@ -597,14 +600,14 @@ class MainWindow(QMainWindow):
 
         self._maybe_start_drive_scan(folder_path)
         self._prime_folder_thumbnails()
-        self._queue_visible_thumbnails()
+        self._schedule_visible_thumbnails()
 
     def _on_list_item_activated(self, index: QModelIndex) -> None:
         file_path = self._file_path_from_list_index(index)
         if not file_path:
             return
 
-        if not Path(file_path).is_dir():
+        if not self._is_dir_from_index(index):
             return
 
         tree_index = self.tree_model.index(file_path)
@@ -622,7 +625,7 @@ class MainWindow(QMainWindow):
 
         current_path = Path(current_root)
         parent = current_path.parent
-        if parent == current_path or not parent.exists():
+        if parent == current_path:
             return
 
         parent_str = str(parent)
@@ -709,7 +712,7 @@ class MainWindow(QMainWindow):
         if not file_path:
             return
 
-        if Path(file_path).is_dir():
+        if self._is_dir_from_index(current):
             self.metadata_text.setPlainText(f"Path: {file_path}\n\nType: Folder")
             return
 
@@ -725,6 +728,31 @@ class MainWindow(QMainWindow):
         worker.signals.finished.connect(self._on_metadata_ready)
         worker.signals.error.connect(self._on_metadata_error)
         self.thread_pool.start(worker)
+
+    def _schedule_visible_thumbnails(self) -> None:
+        """Debounce visible-thumbnail queuing to avoid redundant work during rapid scrolling/switching."""
+        if self._visible_thumb_timer is not None:
+            self._visible_thumb_timer.stop()
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+        timer.setInterval(50)
+        timer.timeout.connect(self._queue_visible_thumbnails)
+        self._visible_thumb_timer = timer
+        timer.start()
+
+    def _is_dir_from_index(self, index: QModelIndex) -> bool:
+        """Check directory status via the model (no filesystem stat)."""
+        if not index.isValid():
+            return False
+        model = index.model()
+        if isinstance(model, QSortFilterProxyModel):
+            source_index = model.mapToSource(index)
+            source_model = model.sourceModel()
+            if isinstance(source_model, QFileSystemModel) and source_index.isValid():
+                return bool(source_model.isDir(source_index))
+        if isinstance(model, QFileSystemModel):
+            return bool(model.isDir(index))
+        return False
 
     def _queue_visible_thumbnails(self) -> None:
         viewport = self.list_view.viewport()
@@ -778,7 +806,7 @@ class MainWindow(QMainWindow):
             if file_path:
                 self._request_thumbnail(file_path, idx)
 
-        QTimer.singleShot(80, self._queue_visible_thumbnails)
+        QTimer.singleShot(80, self._schedule_visible_thumbnails)
 
     def _on_directory_loaded(self, path: str) -> None:
         current_root = self._current_list_root_path()
@@ -812,11 +840,16 @@ class MainWindow(QMainWindow):
         slice_request: dict | None = None,
         extra: dict | None = None,
     ) -> None:
-        try:
-            if Path(file_path).is_dir():
+        # Use the model to check directory status (no filesystem stat)
+        if index is not None:
+            if self._is_dir_from_index(index):
                 return
-        except Exception:
-            return
+        else:
+            try:
+                if Path(file_path).is_dir():
+                    return
+            except Exception:
+                return
 
         request_size = size if size is not None else self._thumbnail_size
         key = self._cache_key(file_path, request_size, slice_request=slice_request)
@@ -1167,7 +1200,7 @@ class MainWindow(QMainWindow):
         )
 
         # Refresh visible thumbnails in case new cache entries appeared
-        self._queue_visible_thumbnails()
+        self._schedule_visible_thumbnails()
 
     def _on_full_index_error(self, drive_root: str, error_message: str) -> None:
         self._status_bar.showMessage(f"Index error on {drive_root}: {error_message}")

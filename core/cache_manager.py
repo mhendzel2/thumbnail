@@ -49,7 +49,7 @@ class LruMemoryCache:
 
 
 class CacheManager:
-    def __init__(self, ram_items: int = 512, disk_path: str | None = None):
+    def __init__(self, ram_items: int = 4096, disk_path: str | None = None):
         cache_dir = Path(disk_path) if disk_path else Path.home() / ".microscopy_cache"
         cache_dir.mkdir(parents=True, exist_ok=True)
 
