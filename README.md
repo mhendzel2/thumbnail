@@ -41,6 +41,16 @@ start.bat
 .venv\Scripts\python.exe build.py
 ```
 
+## PSD/AI regression check
+
+Run this against real sample files to verify PSD and Illustrator decoding end-to-end:
+
+```bat
+.venv\Scripts\python.exe scripts\regression_psd_ai_viewer.py --psd "C:\path\sample.psd" --ai "C:\path\sample.ai"
+```
+
+You can pass multiple `--psd` and `--ai` arguments.
+
 ## Notes on large files
 
 - Large non-OME TIFF/STK files use memory-safe fallback paths to avoid full-array allocations.
