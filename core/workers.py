@@ -241,10 +241,12 @@ class FullIndexWorker(QRunnable):
         overall_scanned = 0
         overall_generated = 0
         overall_skipped = 0
+        stopped_early = False
         roots = self._discover_roots()
 
         for drive_root in roots:
             if self._stop_requested:
+                stopped_early = True
                 break
 
             # Skip if already fully scanned
@@ -265,10 +267,12 @@ class FullIndexWorker(QRunnable):
             try:
                 for dir_path, _dir_names, file_names in os.walk(drive_root):
                     if self._stop_requested:
+                        stopped_early = True
                         break
 
                     for file_name in file_names:
                         if self._stop_requested:
+                            stopped_early = True
                             break
 
                         lower = file_name.lower()
@@ -327,13 +331,28 @@ class FullIndexWorker(QRunnable):
                 self._safe_emit(self.signals.error.emit, drive_root, str(exc))
 
         overall_elapsed = round(time.perf_counter() - overall_started, 1)
-        self._safe_emit(
-            self.signals.all_finished.emit,
-            {
-                "total_scanned": overall_scanned,
-                "total_generated": overall_generated,
-                "total_skipped": overall_skipped,
-                "elapsed_s": overall_elapsed,
-                "stopped": self._stop_requested,
-            },
-        )
+        summary = {
+            "total_scanned": overall_scanned,
+            "total_generated": overall_generated,
+            "total_skipped": overall_skipped,
+            "elapsed_s": overall_elapsed,
+            "stopped": stopped_early,
+        }
+
+        # Persist completion from the worker thread so a fast app shutdown
+        # cannot miss this state before the startup prompt check on next launch.
+        if not stopped_early:
+            try:
+                self.cache_manager.set_setting(
+                    "full_index_completed",
+                    {
+                        "completed_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+                        "total_scanned": overall_scanned,
+                        "total_generated": overall_generated,
+                        "elapsed_s": overall_elapsed,
+                    },
+                )
+            except Exception:
+                pass
+
+        self._safe_emit(self.signals.all_finished.emit, summary)

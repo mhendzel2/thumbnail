@@ -41,6 +41,7 @@ IMAGE_FILTERS = [
     "*.png",
     "*.webp",
     "*.psd",
+    "*.ai",
     "*.ims",
     "*.stk",
     "*.czi",
@@ -58,6 +59,7 @@ FILE_TYPE_GROUPS = {
     "IMS": {".ims"},
     "STK": {".stk"},
     "PSD": {".psd"},
+    "AI": {".ai"},
     "PNG": {".png"},
     "JPG": {".jpg", ".jpeg"},
     "VOLOCITY": {".mvd2", ".acff"},
@@ -342,6 +344,7 @@ class MainWindow(QMainWindow):
             ".png",
             ".webp",
             ".psd",
+            ".ai",
             ".ims",
             ".stk",
             ".tif",
@@ -516,7 +519,7 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(self.search_input, 1)
 
         self.type_checkboxes: dict[str, QCheckBox] = {}
-        for label in ("TIFF", "IMS", "STK", "PSD", "PNG", "JPG", "VOLOCITY"):
+        for label in ("TIFF", "IMS", "STK", "PSD", "AI", "PNG", "JPG", "VOLOCITY"):
             checkbox = QCheckBox(label, controls)
             checkbox.setChecked(True)
             checkbox.toggled.connect(lambda checked, name=label: self._on_type_toggled(name, checked))

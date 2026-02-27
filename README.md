@@ -16,7 +16,7 @@ A PyQt6 desktop thumbnail browser optimized for mixed datasets (standard images 
 
 ## Supported file families
 
-- Standard: `.jpg`, `.jpeg`, `.png`, `.webp`, `.psd`
+- Standard: `.jpg`, `.jpeg`, `.png`, `.webp`, `.psd`, `.ai`
 - Microscopy: `.ims`, `.czi`, `.nd2`, `.stk`, `.tif`, `.tiff`, `.ome.tif`, `.ome.tiff`, `.mvd2`, `.acff`
 
 ## Installation
@@ -46,8 +46,9 @@ start.bat
 - Large non-OME TIFF/STK files use memory-safe fallback paths to avoid full-array allocations.
 - IMS files use an HDF5 low-resolution path when available (`h5py`) with BioIO fallback.
 - Volocity `.mvd2` and Volocity Library Clipping `.acff` use BioIO + Bio-Formats plugin support.
+- Adobe Illustrator `.ai` files use Qt PDF rendering when PDF-compatible, with Pillow fallback for legacy PostScript-style files.
 - Folder load state is persisted in the cache database under `~/.microscopy_cache`.
-- Drive scan cache warmup currently pre-caches stable formats (`jpg/jpeg/png/webp/psd/ims/stk/tif/tiff`) for startup safety.
+- Drive scan cache warmup currently pre-caches stable formats (`jpg/jpeg/png/webp/psd/ai/ims/stk/tif/tiff`) for startup safety.
 
 ## Troubleshooting
 
@@ -59,6 +60,10 @@ start.bat
 - **Console shows BioIO unsupported format messages for TIFF/STK**
 	- Non-OME TIFF/STK files are routed through fallback readers first.
 	- If a file is malformed or extremely large, a placeholder may be shown instead of crashing.
+
+- **Some Illustrator (`.ai`) files still show as broken**
+	- PDF-compatible AI files are supported directly.
+	- Older EPS/PostScript-style AI files may require Ghostscript available to Pillow on your system.
 
 - **Volocity files (`.mvd2` / `.acff`) do not open**
 	- Re-run `install.bat` to ensure `bioio-bioformats` is installed in `.venv`.

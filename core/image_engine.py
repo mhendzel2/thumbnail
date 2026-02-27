@@ -15,8 +15,13 @@ from typing import Any
 
 import numpy as np
 from PIL import Image, ImageOps
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QSize, Qt
 from PyQt6.QtGui import QColor, QImage, QPainter, QPixmap
+try:
+    from PyQt6.QtPdf import QPdfDocument, QPdfDocumentRenderOptions
+except Exception:
+    QPdfDocument = None
+    QPdfDocumentRenderOptions = None
 
 try:
     import tifffile
@@ -29,6 +34,7 @@ hdf5plugin = None
 LOGGER = logging.getLogger(__name__)
 
 STANDARD_EXTENSIONS = {".jpg", ".jpeg", ".png", ".webp", ".psd"}
+ILLUSTRATOR_EXTENSIONS = {".ai"}
 MICROSCOPY_EXTENSIONS = {".ims", ".czi", ".nd2", ".stk", ".tiff", ".tif", ".ome.tif", ".ome.tiff", ".mvd2", ".acff"}
 
 
@@ -71,6 +77,9 @@ class ImageEngine:
     ) -> ThumbnailResult:
         path = Path(file_path)
         ext = path.suffix.lower()
+
+        if ext in ILLUSTRATOR_EXTENSIONS:
+            return self._load_illustrator_thumbnail(path, size)
 
         if ext in STANDARD_EXTENSIONS:
             return self._load_standard_thumbnail(path, size)
@@ -120,6 +129,9 @@ class ImageEngine:
     def load_metadata(self, file_path: str) -> dict[str, Any]:
         path = Path(file_path)
         ext = path.suffix.lower()
+
+        if ext in ILLUSTRATOR_EXTENSIONS:
+            return self._load_illustrator_metadata(path)
 
         if ext in STANDARD_EXTENSIONS:
             try:
@@ -215,6 +227,105 @@ class ImageEngine:
                 pixmap=self._broken_placeholder(size),
                 metadata={"broken": True, "error": str(exc)},
             )
+
+    def _load_illustrator_thumbnail(self, path: Path, size: int) -> ThumbnailResult:
+        # Modern .ai files are usually PDF-compatible; render first page with QtPdf.
+        pdf_result = self._render_pdf_first_page(path, size)
+        if pdf_result is not None:
+            return pdf_result
+
+        # Older EPS/PostScript-style AI may still decode via Pillow/Ghostscript.
+        return self._load_standard_thumbnail(path, size)
+
+    def _load_illustrator_metadata(self, path: Path) -> dict[str, Any]:
+        pdf_meta = self._pdf_page_metadata(path)
+        if pdf_meta is not None:
+            return pdf_meta
+
+        try:
+            with Image.open(path) as image:
+                channels = len(image.getbands())
+                y, x = image.height, image.width
+                return {
+                    "shape_tczyx": (1, channels, 1, y, x),
+                    "dtype": str(np.asarray(image).dtype),
+                    "pixel_size_um": None,
+                    "t_count": 1,
+                    "c_count": channels,
+                    "z_count": 1,
+                    "source": "ai-pillow",
+                }
+        except Exception as exc:
+            return {"broken": True, "error": str(exc)}
+
+    def _render_pdf_first_page(self, path: Path, size: int) -> ThumbnailResult | None:
+        if QPdfDocument is None or QPdfDocumentRenderOptions is None:
+            return None
+
+        try:
+            doc = QPdfDocument(None)
+            error = doc.load(str(path))
+            if error != QPdfDocument.Error.None_:
+                return None
+            if doc.pageCount() < 1:
+                return None
+
+            page_size = doc.pagePointSize(0)
+            page_w = max(1.0, float(page_size.width()))
+            page_h = max(1.0, float(page_size.height()))
+            aspect = page_w / page_h
+
+            if aspect >= 1.0:
+                target_w = max(size * 2, 512)
+                target_h = max(1, int(target_w / aspect))
+            else:
+                target_h = max(size * 2, 512)
+                target_w = max(1, int(target_h * aspect))
+
+            rendered = doc.render(0, QSize(int(target_w), int(target_h)), QPdfDocumentRenderOptions())
+            if rendered.isNull():
+                return None
+
+            pixmap = self._fit_to_square(QPixmap.fromImage(rendered), size)
+            return ThumbnailResult(
+                pixmap=pixmap,
+                metadata={
+                    "shape_tczyx": (1, 3, 1, rendered.height(), rendered.width()),
+                    "dtype": "uint8",
+                    "pixel_size_um": None,
+                    "t_count": 1,
+                    "c_count": 3,
+                    "z_count": 1,
+                    "source": "ai-qtpdf",
+                },
+            )
+        except Exception:
+            return None
+
+    def _pdf_page_metadata(self, path: Path) -> dict[str, Any] | None:
+        if QPdfDocument is None:
+            return None
+
+        try:
+            doc = QPdfDocument(None)
+            error = doc.load(str(path))
+            if error != QPdfDocument.Error.None_ or doc.pageCount() < 1:
+                return None
+
+            page_size = doc.pagePointSize(0)
+            width = max(1, int(round(float(page_size.width()))))
+            height = max(1, int(round(float(page_size.height()))))
+            return {
+                "shape_tczyx": (1, 3, 1, height, width),
+                "dtype": "uint8",
+                "pixel_size_um": None,
+                "t_count": 1,
+                "c_count": 3,
+                "z_count": 1,
+                "source": "ai-qtpdf",
+            }
+        except Exception:
+            return None
 
     def _load_microscopy_thumbnail(
         self,
