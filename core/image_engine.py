@@ -207,6 +207,21 @@ class ImageEngine:
         name = path.name.lower()
         return name.endswith(".ome.tif") or name.endswith(".ome.tiff")
 
+    def _has_tiff_signature(self, path: Path) -> bool:
+        try:
+            with path.open("rb") as stream:
+                header = stream.read(4)
+        except Exception:
+            return False
+
+        if len(header) < 4:
+            return False
+
+        if header[:2] not in (b"II", b"MM"):
+            return False
+
+        return header[2:4] in (b"*\x00", b"\x00*", b"+\x00", b"\x00+")
+
     def _load_standard_thumbnail(self, path: Path, size: int) -> ThumbnailResult:
         try:
             with Image.open(path) as image:
@@ -388,6 +403,9 @@ class ImageEngine:
             pass
 
         if tifffile is None:
+            return None
+
+        if not self._has_tiff_signature(path):
             return None
 
         try:
@@ -875,6 +893,9 @@ class ImageEngine:
 
     def _load_tiff_metadata(self, path: Path) -> dict[str, Any] | None:
         if tifffile is None:
+            return None
+
+        if not self._has_tiff_signature(path):
             return None
 
         try:
